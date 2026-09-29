@@ -1,0 +1,154 @@
+#include "loina_internal.h"
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define check(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while (0)
+static int loaded,unloaded,restored,web_calls,tool_chat;
+static unsigned backends(void) { return LOINA_CPU|LOINA_VULKAN|LOINA_OPENCL; }
+static void *load(loina_engine *e, const loina_package *p, loina_job *j, loina_error *error) {
+    (void)e;(void)p;(void)j;(void)error;loaded++;return malloc(1);
+}
+static void unload(void *p) { unloaded++;free(p); }
+static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, loina_error *error) {
+    (void)p;(void)error;
+    if (tool_chat) {
+        const loina_message *last=&s->messages[s->count-1];
+        *out=loina_strdup(tool_chat==3 ? "<think>Search needed.</think> name=\"web_search\"> name=\"query\">test" :
+            (tool_chat==4 || tool_chat==5) ? "<function name=\"web_search\"><param name=\"query\">test</param></function>" :
+            !strncmp(last->text,"<tool_response>",15) ?
+            "The page says so." : tool_chat==2 ?
+            "<function name=\"web_visit\"><param name=\"url\">https://example.com/?a=1&amp;b=2</param></function>" :
+            "<think>Need a current source.</think>\n<function name=\"web_search\"><param name=\"query\"><![CDATA[a b&c]]></param></function>");
+        return *out ? LOINA_OK : LOINA_MEMORY;
+    }
+    loina_emit(j,LOINA_TOKEN,"fixture",7,0);
+    if (loina_job_cancelled(j)) return LOINA_CANCELLED;
+    *out=loina_strdup("fixture");return *out ? LOINA_OK : LOINA_MEMORY;
+}
+static bool save(void *p, const char *path) { (void)p;FILE *f=fopen(path,"wb");if (!f) return false;bool ok=fwrite("fixture",1,7,f)==7;return fclose(f)==0 && ok; }
+static bool restore(void *p, const char *path) { (void)p;(void)path;restored++;return true; }
+const loina_runtime loina_test_runtime={.name="llama",.revision="test-runtime",.abi=1,.backends=backends,
+    .load=load,.unload=unload,.chat=chat,.save=save,.restore=restore};
+static void write_file(const char *path, const void *data, size_t n) { FILE *f=fopen(path,"wb");check(f);check(fwrite(data,1,n,f)==n);check(!fclose(f)); }
+static void cancel_event(void *user, loina_event type, const char *text, size_t n, int progress) {
+    (void)text;(void)n;(void)progress;
+    if (type==LOINA_TOKEN) loina_job_cancel(*(loina_job **)user);
+}
+static void count_session(void *user, const char *id) { check(loina_name_valid(id));(*(int *)user)++; }
+static loina_status web(void *user, const char *url, char **text, loina_job *job, loina_error *error) {
+    (void)user;(void)job;(void)error;
+    check(strstr(url,tool_chat==2 ? "https://example.com/?a=1&b=2" : tool_chat>=4 ? "html.duckduckgo.com/html/?q=test" : "html.duckduckgo.com/html/?q=a%20b%26c"));web_calls++;
+    *text=loina_strdup(tool_chat==4 ? "Tool error: Web page timed out" : "page");return LOINA_OK;
+}
+int main(int argc, char **argv) {
+    check(argc==2);
+    char hash[65];
+    loina_sha sha;
+    loina_sha_init(&sha);loina_sha_update(&sha,"abc",3);loina_sha_final(&sha,hash);
+    check(!strcmp(hash,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+    loina_sha_init(&sha);
+    for (int i=0;i<1000000;i++) loina_sha_update(&sha,"a",1);
+    loina_sha_final(&sha,hash);
+    check(!strcmp(hash,"cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"));
+    check(!loina_name_valid("../escape"));check(!loina_name_valid("a\\b"));check(loina_name_valid("chat-123"));
+    loina_config config={.directory=argv[1],.context=1024,.web=web,
+        .device={.ram_bytes=16000000000,.available_ram_bytes=10000000000,.storage_bytes=20000000000,.threads=2,.backends=LOINA_CPU}};
+    loina_error error={0};
+    loina_engine *e=loina_open(&config,&error);check(e);
+    int text_packages=0;
+    for (size_t i=0;i<loina_catalog_count();i++) {
+        const loina_package *model=loina_catalog_get(i);
+        if (model->feature==LOINA_TEXT) { text_packages++;check(model->quality==4); }
+    }
+    check(text_packages==1);
+    const loina_package *selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==4);
+    e->config.device.backends|=LOINA_VULKAN;
+    selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==4);
+    e->config.device.backends=LOINA_OPENCL;
+    check(loina_resolve(e,LOINA_TEXT,&error)==selected);
+    e->config.device.backends=LOINA_CPU|LOINA_VULKAN;
+    e->config.device.available_ram_bytes=1000;
+    selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==4);
+    e->config.device.ram_bytes=3000000000;check(!loina_resolve(e,LOINA_TEXT,&error));
+    e->config.device.ram_bytes=16000000000;
+    e->config.device.storage_bytes=1;check(loina_resolve(e,LOINA_TEXT,&error));
+    e->config.device.storage_bytes=20000000000;
+    e->config.device.available_ram_bytes=10000000000;
+    loina_package p={.id="test-model",.name="Test",.license="MIT",.runtime="llama",.runtime_abi=1,
+        .feature=LOINA_TEXT,.quality=4,.backends=LOINA_CPU,.memory_bytes=100,.file_count=1,
+        .files={{.name="model.gguf",.sha256="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",.bytes=3}}};
+    char import[LOINA_PATH],path[LOINA_PATH];
+    check(loina_path(import,argv[1],"import",NULL));check(loina_mkdir(import));check(loina_path(path,import,"model.gguf",NULL));
+    loina_uninstall(e,&p,NULL);
+    write_file(path,"bad",3);check(loina_install(e,&p,import,NULL,&error)==LOINA_INTEGRITY);check(!loina_package_installed(e,&p));
+    write_file(path,"abc",3);check(loina_install(e,&p,import,NULL,&error)==LOINA_OK);check(loina_package_installed(e,&p));
+    loina_package incompatible=p;incompatible.runtime_abi=2;check(!loina_package_installed(e,&incompatible));
+    check(loina_install(e,&incompatible,import,NULL,&error)==LOINA_INTEGRITY);
+    loina_session *s=loina_session_create(e,"regression",&error);check(s);
+    check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"Hello"));
+    check(loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"Hi"));
+    check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"Again"));
+    char *prompt=loina_chat_prompt_minicpm5(s,"System");check(prompt);
+    check(!strcmp(prompt,"<|im_start|>system\nSystem<|im_end|>\n"
+        "<|im_start|>user\nHello<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\nHi<|im_end|>\n"
+        "<|im_start|>user\nAgain<|im_end|>\n<|im_start|>assistant\n"));
+    free(prompt);
+    loina_session_truncate(s,1);
+    check(loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"<think>\nReason\n</think>\n\nAnswer"));
+    prompt=loina_chat_prompt_minicpm5(s,"System");check(prompt);
+    check(strstr(prompt,"<|im_start|>assistant\n<think>\nReason\n</think>\n\nAnswer<|im_end|>\n"));
+    free(prompt);
+    loina_session_truncate(s,0);
+    loina_request request=loina_request_default(LOINA_TEXT);
+    check(request.temperature==1.0f && request.min_p==0.0f);
+    request.package=&p;request.session=s;request.prompt="hello";
+    loina_job *j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK);check(!strcmp(loina_job_result(j),"fixture"));
+    check(loina_job_run(j,&error)==LOINA_INVALID);loina_job_free(j);
+    check(s->count==2 && !strcmp(s->package_id,p.id));
+    loina_session *again=loina_session_load(e,"regression",&error);check(again && again->count==2);loina_session_free(again);
+    check(loina_cache_restore(e,s));check(restored==1);
+    check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"different transcript"));check(!loina_cache_restore(e,s));
+    loina_session_truncate(s,2);
+    j=loina_job_create(e,&request,cancel_event,&j,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_CANCELLED);check(s->count==2);check(!e->model);loina_job_free(j);
+    request.temperature=NAN;check(!loina_job_create(e,&request,NULL,NULL,&error));request.temperature=0.7f;
+    char *text=NULL;
+    check(loina_web_search(e,"a b&c",&text,NULL,&error)==LOINA_OK);check(!strcmp(text,"page"));free(text);
+    check(loina_web_visit(e,"file:///secret",&text,NULL,&error)==LOINA_INVALID);
+    request.tools=true;request.prompt="Find current information";tool_chat=1;
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK);
+    check(strstr(loina_job_result(j),"The page says so"));check(web_calls==2);
+    check(s->count==6);loina_job_free(j);tool_chat=0;
+    request.prompt="Read this page";tool_chat=2;
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK);check(web_calls==3);
+    check(s->count==10);loina_job_free(j);tool_chat=0;
+    request.prompt="Search with a malformed tool call";tool_chat=3;
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK);check(strstr(loina_job_result(j),"couldn't complete"));
+    check(s->count==12);loina_job_free(j);tool_chat=0;
+    request.prompt="Search when the browser times out";tool_chat=4;
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK);check(strstr(loina_job_result(j),"couldn't complete"));
+    check(s->count==14 && web_calls==4);loina_job_free(j);tool_chat=0;
+    request.prompt="Search without stopping";tool_chat=5;
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK);check(strstr(loina_job_result(j),"couldn't complete"));
+    check(s->count==24 && web_calls==8);loina_job_free(j);tool_chat=0;
+    check(!loina_session_load(e,"../escape",&error));
+    int sessions=0;check(!loina_session_list(e,count_session,&sessions,&error));check(sessions>=1);
+    check(loina_path(path,argv[1],"outputs","sample.png"));
+    unsigned char pixels[12]={255,0,0,0,255,0,0,0,255,255,255,255};
+    check(!loina_png(path,pixels,2,2,3,&error));check(loina_file_bytes(path)>50);
+    check(loina_path(path,argv[1],"sessions","bad.chat"));write_file(path,"LOINA01\n\377\377\377\377",12);
+    check(!loina_session_load(e,"bad",&error));
+    check(!loina_session_delete(e,"bad",&error));check(!loina_session_delete(e,"regression",&error));
+    check(!loina_uninstall(e,&p,&error));check(!loina_package_installed(e,&p));
+    loina_session_free(s);loina_close(e);check(loaded==unloaded);
+    puts("Core regression tests passed");
+    return 0;
+}
