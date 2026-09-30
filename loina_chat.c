@@ -43,7 +43,8 @@ bool loina_chat_compact(loina_session *s, loina_job *job) {
     size_t first=s->first;
     if (first<s->count && s->messages[first].role==LOINA_SYSTEM) first++;
     size_t next=first+1;
-    while (next<s->count && s->messages[next].role!=LOINA_USER) next++;
+    while (next<s->count && (s->messages[next].role!=LOINA_USER ||
+        !strncmp(s->messages[next].text,"<tool_response>",15))) next++;
     if (next>=s->count) return false;
     /* Only complete old turns leave the active prefix. The full transcript
      * remains on disk; removing half a turn would corrupt role alternation. */
@@ -106,6 +107,39 @@ static loina_status web_fallback(char **reply, loina_error *error) {
     if (error) memset(error,0,sizeof(*error));
     return LOINA_OK;
 }
+typedef struct {
+    loina_event_fn event;
+    void *user;
+    loina_buffer pending;
+    bool visible, hidden, failed;
+} chat_stream;
+static void chat_event(void *user, loina_event event, const char *text, size_t n, int progress) {
+    chat_stream *s=user;
+    if (!s->event) return;
+    if (event!=LOINA_TOKEN || s->visible) { s->event(s->user,event,text,n,progress);return; }
+    if (s->hidden || s->failed) return;
+    if (!loina_buffer_add(&s->pending,text,n)) { s->failed=true;return; }
+    const char *answer=s->pending.data;
+    while (isspace((unsigned char)*answer)) answer++;
+    if (!strncmp(answer,"<think>",7)) {
+        const char *end=strstr(answer+7,"</think>");
+        if (!end) return;
+        answer=end+8;
+        while (isspace((unsigned char)*answer)) answer++;
+    }
+    if (!*answer) return;
+    const char *prefixes[]={"<think>","<function", "<web_search>","<web_visit>","name=\"",NULL};
+    for (int i=0;prefixes[i];i++) {
+        size_t have=strlen(answer),prefix=strlen(prefixes[i]);
+        if (have<prefix && !strncmp(answer,prefixes[i],have)) return;
+        if (i && have>=prefix && !strncmp(answer,prefixes[i],prefix)) { s->hidden=true;return; }
+    }
+    /* Classify the response before releasing its preamble. A tool's XML and
+     * reasoning must never flash on screen while it is being recognized. */
+    s->visible=true;
+    s->event(s->user,LOINA_TOKEN,s->pending.data,s->pending.length,0);
+    free(s->pending.data);s->pending=(loina_buffer){0};
+}
 loina_status loina_chat(loina_job *job, loina_error *error) {
     loina_engine *e=job->engine;
     loina_request *r=&job->request;
@@ -154,7 +188,12 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
     /* Native browser tools use a small model-independent envelope. Limit the
      * loop so a model cannot spend an unbounded time navigating the web. */
     for (int round=0;round<5;round++) {
+        chat_stream stream={.event=job->event,.user=job->user};
+        if (r->tools) { job->event=chat_event;job->user=&stream; }
         status=e->runtime->chat(e->model,s,job,&reply,error);
+        if (r->tools) { job->event=stream.event;job->user=stream.user; }
+        free(stream.pending.data);
+        if (stream.failed && !status) status=loina_fail(error,LOINA_MEMORY,"Cannot buffer chat output");
         if (status) break;
         char *argument=NULL,*document=NULL;
         bool search=r->tools && tool_request(reply,"web_search","query",&argument);
@@ -188,7 +227,11 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
     }
     if (!status) { job->result=reply;reply=NULL; }
 done:
-    if (status) { loina_session_truncate(s,original);s->first=old_first;strcpy(s->package_id,old_package); }
+    if (status) {
+        loina_session_truncate(s,original);s->first=old_first;strcpy(s->package_id,old_package);
+        e->cache_session[0]=e->cache_transcript[0]=0;
+        if (e->model && e->runtime->reset) e->runtime->reset(e->model);
+    }
     free(reply);free(augmented);
     if (temporary) loina_session_free(s);
     return status;

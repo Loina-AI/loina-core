@@ -4,7 +4,7 @@
 #include <string.h>
 
 #define check(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while (0)
-static int loaded,unloaded,restored,web_calls,tool_chat;
+static int loaded,unloaded,restored,reset_count,web_calls,tool_chat;
 static unsigned backends(void) { return LOINA_CPU|LOINA_VULKAN|LOINA_OPENCL; }
 static void *load(loina_engine *e, const loina_package *p, loina_job *j, loina_error *error) {
     (void)e;(void)p;(void)j;(void)error;loaded++;return malloc(1);
@@ -20,6 +20,7 @@ static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, lo
             "The page says so." : tool_chat==2 ?
             "<function name=\"web_visit\"><param name=\"url\">https://example.com/?a=1&amp;b=2</param></function>" :
             "<think>Need a current source.</think>\n<function name=\"web_search\"><param name=\"query\"><![CDATA[a b&c]]></param></function>");
+        if (*out) for (size_t i=0;(*out)[i];i++) loina_emit(j,LOINA_TOKEN,*out+i,1,0);
         return *out ? LOINA_OK : LOINA_MEMORY;
     }
     loina_emit(j,LOINA_TOKEN,"fixture",7,0);
@@ -28,8 +29,13 @@ static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, lo
 }
 static bool save(void *p, const char *path) { (void)p;FILE *f=fopen(path,"wb");if (!f) return false;bool ok=fwrite("fixture",1,7,f)==7;return fclose(f)==0 && ok; }
 static bool restore(void *p, const char *path) { (void)p;(void)path;restored++;return true; }
+static void reset(void *p) { (void)p;reset_count++; }
 const loina_runtime loina_test_runtime={.name="llama",.revision="test-runtime",.abi=1,.backends=backends,
-    .load=load,.unload=unload,.chat=chat,.save=save,.restore=restore};
+    .load=load,.unload=unload,.chat=chat,.save=save,.restore=restore,.reset=reset};
+static void capture_event(void *user, loina_event type, const char *text, size_t n, int progress) {
+    (void)progress;
+    if (type==LOINA_TOKEN) check(loina_buffer_add(user,text,n));
+}
 static void write_file(const char *path, const void *data, size_t n) { FILE *f=fopen(path,"wb");check(f);check(fwrite(data,1,n,f)==n);check(!fclose(f)); }
 static void cancel_event(void *user, loina_event type, const char *text, size_t n, int progress) {
     (void)text;(void)n;(void)progress;
@@ -56,6 +62,14 @@ int main(int argc, char **argv) {
         .device={.ram_bytes=16000000000,.available_ram_bytes=10000000000,.storage_bytes=20000000000,.threads=2,.backends=LOINA_CPU}};
     loina_error error={0};
     loina_engine *e=loina_open(&config,&error);check(e);
+    check(loina_available_backends(e)==LOINA_CPU);
+    check(loina_set_backend(e,LOINA_CUDA,&error)==LOINA_UNSUPPORTED);
+    check(loina_set_backend(e,LOINA_CPU|LOINA_VULKAN,&error)==LOINA_UNSUPPORTED);
+    atomic_store(&e->busy,true);
+    check(loina_set_backend(e,LOINA_CPU,&error)==LOINA_BUSY);
+    atomic_store(&e->busy,false);
+    check(loina_set_backend(e,LOINA_CPU,&error)==LOINA_OK);
+    check(loina_set_backend(e,0,&error)==LOINA_OK);
     int text_packages=0;
     for (size_t i=0;i<loina_catalog_count();i++) {
         const loina_package *model=loina_catalog_get(i);
@@ -101,6 +115,16 @@ int main(int argc, char **argv) {
     check(strstr(prompt,"<|im_start|>assistant\n<think>\nReason\n</think>\n\nAnswer<|im_end|>\n"));
     free(prompt);
     loina_session_truncate(s,0);
+    /* A web round belongs to the user turn that requested it. Compaction
+     * cannot leave the tool result behind without its assistant call. */
+    check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"Search"));
+    check(loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"<function name=\"web_search\">call</function>"));
+    check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"<tool_response>page</tool_response>"));
+    check(loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"Answer"));
+    check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"Next question"));
+    check(loina_chat_compact(s,NULL) && s->first==4);
+    check(!loina_chat_compact(s,NULL));
+    loina_session_truncate(s,0);s->first=0;
     loina_request request=loina_request_default(LOINA_TEXT);
     check(request.temperature==1.0f && request.min_p==0.0f);
     request.package=&p;request.session=s;request.prompt="hello";
@@ -109,19 +133,38 @@ int main(int argc, char **argv) {
     check(loina_job_run(j,&error)==LOINA_INVALID);loina_job_free(j);
     check(s->count==2 && !strcmp(s->package_id,p.id));
     loina_session *again=loina_session_load(e,"regression",&error);check(again && again->count==2);loina_session_free(again);
+    check(loina_cache_restore(e,s));check(restored==0);
+    loina_unload(e);
+    check(loina_activate(e,&p,NULL,&error)==LOINA_OK);
     check(loina_cache_restore(e,s));check(restored==1);
+    check(loina_set_backend(e,LOINA_CPU,&error)==LOINA_OK && !e->model);
+    check(loina_activate(e,&p,NULL,&error)==LOINA_OK);
+    check(!loina_cache_restore(e,s));
+    check(loina_set_backend(e,0,&error)==LOINA_OK && !e->model);
+    check(loina_activate(e,&p,NULL,&error)==LOINA_OK);
+    check(loina_cache_restore(e,s));check(restored==2);
+    int resets=reset_count;
     check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"different transcript"));check(!loina_cache_restore(e,s));
+    check(reset_count==resets+1 && !e->cache_session[0]);
     loina_session_truncate(s,2);
+    loina_session *fresh=loina_session_create(e,"fresh",&error);check(fresh);
+    check(!loina_cache_restore(e,fresh));check(reset_count==resets+2);
+    loina_session_free(fresh);
     j=loina_job_create(e,&request,cancel_event,&j,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_CANCELLED);check(s->count==2);check(!e->model);loina_job_free(j);
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK);check(s->count==4);loina_job_free(j);
+    loina_session_truncate(s,2);
     request.temperature=NAN;check(!loina_job_create(e,&request,NULL,NULL,&error));request.temperature=0.7f;
     char *text=NULL;
     check(loina_web_search(e,"a b&c",&text,NULL,&error)==LOINA_OK);check(!strcmp(text,"page"));free(text);
     check(loina_web_visit(e,"file:///secret",&text,NULL,&error)==LOINA_INVALID);
     request.tools=true;request.prompt="Find current information";tool_chat=1;
-    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    loina_buffer visible={0};
+    j=loina_job_create(e,&request,capture_event,&visible,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_OK);
     check(strstr(loina_job_result(j),"The page says so"));check(web_calls==2);
+    check(visible.data && !strcmp(visible.data,"The page says so."));free(visible.data);
     check(s->count==6);loina_job_free(j);tool_chat=0;
     request.prompt="Read this page";tool_chat=2;
     j=loina_job_create(e,&request,NULL,NULL,&error);check(j);

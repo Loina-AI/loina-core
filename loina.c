@@ -56,6 +56,7 @@ loina_engine *loina_open(const loina_config *c, loina_error *error) {
     if (!e->config.device.threads) e->config.device.threads=d.threads;
     if (!e->config.device.backends) e->config.device.backends=d.backends;
     e->config.device.backends &= loina_runtime_backends();
+    e->available_backends=e->config.device.backends;
     if (e->config.device.threads<1 || e->config.device.threads>64) {
         loina_fail(error,LOINA_INVALID,"Invalid CPU thread count"); free(e); return NULL;
     }
@@ -65,6 +66,7 @@ loina_engine *loina_open(const loina_config *c, loina_error *error) {
 void loina_unload(loina_engine *e) {
     if (e->model) e->runtime->unload(e->model);
     e->model=NULL; e->runtime=NULL; e->package=NULL;
+    e->cache_session[0]=e->cache_transcript[0]=0;
 }
 void loina_close(loina_engine *e) {
     if (!e) return;
@@ -72,6 +74,19 @@ void loina_close(loina_engine *e) {
     free(e);
 }
 const loina_device *loina_get_device(const loina_engine *e) { return e ? &e->config.device : NULL; }
+unsigned loina_available_backends(const loina_engine *e) { return e ? e->available_backends : 0; }
+loina_status loina_set_backend(loina_engine *e, unsigned backend, loina_error *error) {
+    if (!e || (backend && ((backend & (backend-1)) || !(backend & e->available_backends))))
+        return loina_fail(error,LOINA_UNSUPPORTED,"Runtime is unavailable on this device");
+    if (atomic_exchange(&e->busy,true)) return loina_fail(error,LOINA_BUSY,"Engine is busy");
+    if (backend!=e->selected_backend) {
+        loina_unload(e);
+        e->selected_backend=backend;
+        e->config.device.backends=backend ? backend : e->available_backends;
+    }
+    atomic_store(&e->busy,false);
+    return LOINA_OK;
+}
 loina_status loina_activate(loina_engine *e, const loina_package *p, loina_job *job, loina_error *error) {
     if (!loina_package_valid(p)) return loina_fail(error,LOINA_INVALID,"Invalid model package");
     const loina_runtime *r=loina_runtime_find(p->runtime);

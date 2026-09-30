@@ -54,8 +54,11 @@ typedef struct {
 } loina_message;
 typedef enum {
     LOINA_LOADING = 1, LOINA_TOKEN, LOINA_PROGRESS, LOINA_COMPACTED,
-    LOINA_TOOL, LOINA_FINISHED
+    LOINA_TOOL, LOINA_FINISHED, LOINA_METRICS
 } loina_event;
+/* LOINA_METRICS carries JSON: prefill/decode in tokens per second, the backend
+ * bit actually used, and context/capacity in tokens. Measurements exclude
+ * model loading and KV I/O. */
 /* Callbacks run on the thread executing the job. Tokens are UTF-8 byte spans;
  * they need not end on a codepoint boundary. No engine reentry from callbacks. */
 typedef void (*loina_event_fn)(void *user, loina_event event,
@@ -96,6 +99,10 @@ loina_status loina_device_probe(const char *directory, loina_device *device, loi
 loina_engine *loina_open(const loina_config *config, loina_error *error);
 void loina_close(loina_engine *engine); /* Wait for jobs before closing. */
 const loina_device *loina_get_device(const loina_engine *engine);
+unsigned loina_available_backends(const loina_engine *engine);
+/* Zero restores automatic selection. A nonzero choice must be one available
+ * backend; changing it unloads the resident model and its context. */
+loina_status loina_set_backend(loina_engine *engine, unsigned backend, loina_error *error);
 const loina_package *loina_resolve(loina_engine *engine, loina_feature feature, loina_error *error);
 bool loina_package_installed(loina_engine *engine, const loina_package *package);
 bool loina_package_compatible(loina_engine *engine, const loina_package *package);

@@ -18,6 +18,7 @@ typedef struct {
     size_t count,capacity;
     uint32_t context_size;
     bool minicpm5;
+    unsigned backend;
     loina_job *job;
 } llama_state;
 
@@ -82,13 +83,19 @@ static void *llama_load(loina_engine *e, const loina_package *p, loina_job *job,
         ggml_backend_dev_t device=gpu_device(e->config.device.backends & order[i],p->memory_bytes);
         if (device) candidates[count++]=device;
     }
-    candidates[count++]=NULL;
+    if (!e->selected_backend || (e->selected_backend & (LOINA_CPU|LOINA_NEON))) candidates[count++]=NULL;
     for (int attempt=0;attempt<count;attempt++) {
         ggml_backend_dev_t gpu=candidates[attempt];
         bool accelerated=gpu!=NULL;
         llama_state *s=calloc(1,sizeof(*s));
         if (!s) { loina_fail(error,LOINA_MEMORY,"Cannot allocate llama state");return NULL; }
         s->devices[0]=gpu;
+        s->backend=accelerated ? 0 : LOINA_CPU;
+        if (gpu) {
+            const char *name=ggml_backend_reg_name(ggml_backend_dev_backend_reg(gpu));
+            s->backend=strstr(name,"OpenCL") ? LOINA_OPENCL : strstr(name,"Vulkan") ? LOINA_VULKAN :
+                strstr(name,"Metal") ? LOINA_METAL : LOINA_CUDA;
+        }
         struct llama_model_params mp=llama_model_default_params();
         mp.devices=accelerated ? s->devices : NULL;
         mp.split_mode=LLAMA_SPLIT_MODE_NONE;
@@ -195,6 +202,20 @@ static int decode(llama_state *s, const llama_token *tokens, int count, int posi
     llama_batch_free(b);
     return rc;
 }
+static void llama_reset(void *pointer) {
+    llama_state *s=pointer;
+    llama_synchronize(s->context);
+    llama_memory_clear(llama_get_memory(s->context),true);
+    s->count=0;
+}
+static void metrics(llama_state *s, loina_job *job, size_t prompt_tokens, int64_t prompt_us,
+                    uint32_t decoded, int64_t decode_us) {
+    char text[224];
+    int n=snprintf(text,sizeof(text),"{\"prefill\":%.2f,\"decode\":%.2f,\"backend\":%u,\"context\":%zu,\"capacity\":%u}",
+        prompt_us>0 ? prompt_tokens*1000000.0/prompt_us : 0,
+        decode_us>0 ? decoded*1000000.0/decode_us : 0,s->backend,s->count,s->context_size);
+    loina_emit(job,LOINA_METRICS,text,(size_t)n,0);
+}
 static loina_status llama_chat_run(void *pointer, loina_session *session, loina_job *job, char **result, loina_error *error) {
     llama_state *s=pointer;
     s->job=job;
@@ -205,6 +226,9 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
     loina_status status=LOINA_OK;
     struct llama_sampler *sampler=NULL;
     loina_buffer output={0};
+    size_t prompt_tokens=0;
+    int64_t prompt_start=llama_time_us(),prompt_us=0,decode_start=0;
+    uint32_t decoded=0;
     for (;;) {
         free(prompt);prompt=render(s,session,job,error);
         if (!prompt) { status=error ? error->code : LOINA_RUNTIME_ERROR;goto done; }
@@ -230,6 +254,7 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
         mtmd_bitmap_free(image.bitmap);mtmd_input_chunks_free(chunks);
         if (status) goto done;
         s->count=(size_t)position;
+        prompt_tokens=s->count;
     } else {
         tokens=malloc((size_t)count*sizeof(*tokens));
         if (!tokens) { status=loina_fail(error,LOINA_MEMORY,"Cannot allocate prompt tokens");goto done; }
@@ -241,6 +266,7 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
             llama_memory_clear(llama_get_memory(s->context),true);common=0;
         }
         s->count=common;
+        prompt_tokens=(size_t)count-common;
         for (int32_t i=(int32_t)common;i<count;) {
             if (loina_job_cancelled(job)) { status=LOINA_CANCELLED;goto done; }
             int32_t n=count-i;
@@ -250,6 +276,9 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
             loina_job_progress(job,(uint64_t)i,(uint64_t)count);
         }
     }
+    llama_synchronize(s->context);
+    prompt_us=llama_time_us()-prompt_start;
+    metrics(s,job,prompt_tokens,prompt_us,0,0);
     sampler=llama_sampler_chain_init(llama_sampler_chain_default_params());
     if (!sampler) { status=loina_fail(error,LOINA_MEMORY,"Cannot allocate sampler");goto done; }
     if (job->request.temperature==0) llama_sampler_chain_add(sampler,llama_sampler_init_greedy());
@@ -260,6 +289,7 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
         llama_sampler_chain_add(sampler,llama_sampler_init_temp(job->request.temperature));
         llama_sampler_chain_add(sampler,llama_sampler_init_dist(job->request.seed));
     }
+    decode_start=llama_time_us();
     for (uint32_t i=0;i<job->request.max_tokens;i++) {
         if (loina_job_cancelled(job)) { status=LOINA_CANCELLED;goto done; }
         llama_token token=llama_sampler_sample(sampler,s->context,-1);
@@ -275,7 +305,14 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
         if (s->count>=s->context_size || decode(s,&token,1,(int)s->count)) { status=loina_fail(error,LOINA_RUNTIME_ERROR,"Token evaluation failed");goto done; }
         if (!s->vision) s->tokens[s->count]=token;
         s->count++;
+        decoded++;
+        if (!(decoded%8)) {
+            llama_synchronize(s->context);
+            metrics(s,job,prompt_tokens,prompt_us,decoded,llama_time_us()-decode_start);
+        }
     }
+    llama_synchronize(s->context);
+    metrics(s,job,prompt_tokens,prompt_us,decoded,llama_time_us()-decode_start);
     if (!output.data) output.data=loina_strdup("");
     if (!output.data) { status=loina_fail(error,LOINA_MEMORY,"Cannot retain result");goto done; }
     *result=output.data;output.data=NULL;
@@ -288,7 +325,9 @@ done:
 }
 static bool llama_save(void *pointer, const char *path) {
     llama_state *s=pointer;
-    return !s->vision && llama_state_save_file(s->context,path,s->tokens,s->count);
+    if (s->vision) return false;
+    llama_synchronize(s->context);
+    return llama_state_save_file(s->context,path,s->tokens,s->count);
 }
 static bool llama_restore(void *pointer, const char *path) {
     llama_state *s=pointer;
@@ -303,5 +342,5 @@ static bool llama_restore(void *pointer, const char *path) {
 const loina_runtime loina_llama={
     .name="llama",.revision=LOINA_LLAMA_REVISION,.abi=LOINA_RUNTIME_ABI,
     .backends=llama_backends,.load=llama_load,.unload=llama_unload,.chat=llama_chat_run,
-    .save=llama_save,.restore=llama_restore
+    .save=llama_save,.restore=llama_restore,.reset=llama_reset
 };

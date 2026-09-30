@@ -19,6 +19,7 @@ typedef struct {
     loina_status (*speech)(void *, loina_job *, char **, loina_error *);
     bool (*save)(void *, const char *);
     bool (*restore)(void *, const char *);
+    void (*reset)(void *);
 } loina_runtime;
 struct loina_engine {
     loina_config config;
@@ -26,6 +27,8 @@ struct loina_engine {
     const loina_runtime *runtime;
     const loina_package *package;
     void *model;
+    unsigned available_backends, selected_backend;
+    char cache_session[128], cache_transcript[65];
     atomic_bool busy;
 };
 struct loina_session {
