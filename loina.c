@@ -126,7 +126,7 @@ loina_status loina_preload(loina_engine *e, loina_feature feature, loina_job *jo
 loina_request loina_request_default(loina_feature feature) {
     /* MiniCPM5's model card warns that min_p=0.05 can trap generation in loops. */
     return (loina_request){.feature=feature,.max_tokens=512,.temperature=1.0f,
-        .top_p=0.95f,.min_p=0.0f,.seed=UINT32_MAX,.width=512,.height=512,.steps=8};
+        .top_p=0.95f,.min_p=0.0f,.seed=UINT32_MAX,.width=512,.height=512,.steps=8,.thinking=true};
 }
 loina_job *loina_job_create(loina_engine *e, const loina_request *r, loina_event_fn event, void *user, loina_error *error) {
     if (!e || !r || r->feature<LOINA_TEXT || r->feature>LOINA_SPEECH ||

@@ -4,7 +4,8 @@
 #include <string.h>
 
 #define check(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while (0)
-static int loaded,unloaded,restored,reset_count,web_calls,tool_chat;
+static int loaded,unloaded,restored,reset_count,web_calls,tool_chat,tool_step;
+static bool thinking_live;
 static unsigned backends(void) { return LOINA_CPU|LOINA_VULKAN|LOINA_OPENCL; }
 static void *load(loina_engine *e, const loina_package *p, loina_job *j, loina_error *error) {
     (void)e;(void)p;(void)j;(void)error;loaded++;return malloc(1);
@@ -14,7 +15,17 @@ static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, lo
     (void)p;(void)error;
     if (tool_chat) {
         const loina_message *last=&s->messages[s->count-1];
-        *out=loina_strdup(tool_chat==3 ? "<think>Search needed.</think> name=\"web_search\"> name=\"query\">test" :
+        static const char *search="<function name=\"web_search\"><param name=\"query\">test</param></function>";
+        static const char *visit="<function name=\"web_visit\"><param name=\"url\">https://example.com/?a=1&amp;b=2</param></function>";
+        int step=tool_step++;
+        *out=loina_strdup(!j->request.tools ? "Answer from the available sources." :
+            tool_chat==6 ? (step==0 ? search : step==1 ? visit : "Answer using the first result despite the failed page.") :
+            tool_chat==7 ? (step<2 ? search : "Answer using the second search result.") :
+            tool_chat==8 ? "<think>First. Second. Third. Fourth.</think>\nAnswer." :
+            tool_chat==9 ? "<think>Reasoning that reached the token limit" :
+            tool_chat==10 && step==0 ? "<think>Find current facts.</think>\n<function name=\"web_search\"><param name=\"query\">test</param></function>\n<function name=\"web_search\"><param name=\"query\">unused</param></function>" :
+            tool_chat==11 && step==0 ? "<function name=\"web_search\"><param name=\"query\">test</param></function>garbage" :
+            tool_chat==3 && strncmp(last->text,"<tool_response>",15) ? "<think>Search needed.</think> name=\"web_search\"> name=\"query\">test" :
             (tool_chat==4 || tool_chat==5) ? "<function name=\"web_search\"><param name=\"query\">test</param></function>" :
             !strncmp(last->text,"<tool_response>",15) ?
             "The page says so." : tool_chat==2 ?
@@ -34,7 +45,12 @@ const loina_runtime loina_test_runtime={.name="llama",.revision="test-runtime",.
     .load=load,.unload=unload,.chat=chat,.save=save,.restore=restore,.reset=reset};
 static void capture_event(void *user, loina_event type, const char *text, size_t n, int progress) {
     (void)progress;
-    if (type==LOINA_TOKEN) check(loina_buffer_add(user,text,n));
+    if (type==LOINA_TOKEN) {
+        loina_buffer *b=user;
+        check(loina_buffer_add(b,text,n));
+        if (strstr(b->data,"Third.") && !strstr(b->data,"</think>")) thinking_live=true;
+    }
+    if (type==LOINA_TOOL) { loina_buffer *b=user;free(b->data);*b=(loina_buffer){0}; }
 }
 static void write_file(const char *path, const void *data, size_t n) { FILE *f=fopen(path,"wb");check(f);check(fwrite(data,1,n,f)==n);check(!fclose(f)); }
 static void cancel_event(void *user, loina_event type, const char *text, size_t n, int progress) {
@@ -44,8 +60,11 @@ static void cancel_event(void *user, loina_event type, const char *text, size_t 
 static void count_session(void *user, const char *id) { check(loina_name_valid(id));(*(int *)user)++; }
 static loina_status web(void *user, const char *url, char **text, loina_job *job, loina_error *error) {
     (void)user;(void)job;(void)error;
-    check(strstr(url,tool_chat==2 ? "https://example.com/?a=1&b=2" : tool_chat>=4 ? "html.duckduckgo.com/html/?q=test" : "html.duckduckgo.com/html/?q=a%20b%26c"));web_calls++;
-    *text=loina_strdup(tool_chat==4 ? "Tool error: Web page timed out" : "page");return LOINA_OK;
+    bool visit=strstr(url,"https://example.com/?a=1&b=2")!=NULL;
+    check(((tool_chat==2 || tool_chat==6) && visit) ||
+        strstr(url,tool_chat>=4 ? "html.duckduckgo.com/html/?q=test" : "html.duckduckgo.com/html/?q=a%20b%26c"));
+    web_calls++;
+    *text=loina_strdup(tool_chat==4 || (tool_chat==6 && visit) ? "Tool error: Web page timed out" : "page");return LOINA_OK;
 }
 int main(int argc, char **argv) {
     check(argc==2);
@@ -103,15 +122,18 @@ int main(int argc, char **argv) {
     check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"Hello"));
     check(loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"Hi"));
     check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"Again"));
-    char *prompt=loina_chat_prompt_minicpm5(s,"System");check(prompt);
+    char *prompt=loina_chat_prompt_minicpm5(s,"System",true);check(prompt);
     check(!strcmp(prompt,"<|im_start|>system\nSystem<|im_end|>\n"
         "<|im_start|>user\nHello<|im_end|>\n"
         "<|im_start|>assistant\n<think>\n\n</think>\n\nHi<|im_end|>\n"
-        "<|im_start|>user\nAgain<|im_end|>\n<|im_start|>assistant\n"));
+        "<|im_start|>user\nAgain<|im_end|>\n<|im_start|>assistant\n<think>\n"));
+    free(prompt);
+    prompt=loina_chat_prompt_minicpm5(s,"System",false);check(prompt);
+    check(strstr(prompt,"<|im_start|>assistant\n<think>\n\n</think>\n\n") != NULL);
     free(prompt);
     loina_session_truncate(s,1);
     check(loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"<think>\nReason\n</think>\n\nAnswer"));
-    prompt=loina_chat_prompt_minicpm5(s,"System");check(prompt);
+    prompt=loina_chat_prompt_minicpm5(s,"System",true);check(prompt);
     check(strstr(prompt,"<|im_start|>assistant\n<think>\nReason\n</think>\n\nAnswer<|im_end|>\n"));
     free(prompt);
     loina_session_truncate(s,0);
@@ -172,16 +194,49 @@ int main(int argc, char **argv) {
     check(s->count==10);loina_job_free(j);tool_chat=0;
     request.prompt="Search with a malformed tool call";tool_chat=3;
     j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
-    check(loina_job_run(j,&error)==LOINA_OK);check(strstr(loina_job_result(j),"couldn't complete"));
-    check(s->count==12);loina_job_free(j);tool_chat=0;
+    check(loina_job_run(j,&error)==LOINA_OK);check(strstr(loina_job_result(j),"The page says so"));
+    check(s->count==14);loina_job_free(j);tool_chat=0;
     request.prompt="Search when the browser times out";tool_chat=4;
     j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
-    check(loina_job_run(j,&error)==LOINA_OK);check(strstr(loina_job_result(j),"couldn't complete"));
-    check(s->count==14 && web_calls==4);loina_job_free(j);tool_chat=0;
+    check(loina_job_run(j,&error)==LOINA_OK);check(strstr(loina_job_result(j),"available sources"));
+    check(s->count==20 && web_calls==5);loina_job_free(j);tool_chat=0;
     request.prompt="Search without stopping";tool_chat=5;
     j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
-    check(loina_job_run(j,&error)==LOINA_OK);check(strstr(loina_job_result(j),"couldn't complete"));
-    check(s->count==24 && web_calls==8);loina_job_free(j);tool_chat=0;
+    check(loina_job_run(j,&error)==LOINA_OK);check(strstr(loina_job_result(j),"available sources"));
+    check(s->count==28 && web_calls==7);loina_job_free(j);tool_chat=0;
+    tool_chat=6;tool_step=0;request.prompt="Keep earlier evidence when a page fails";
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK && web_calls==9);
+    check(strstr(loina_job_result(j),"first result") && strstr(s->messages[s->count-2].text,"timed out"));
+    check(strstr(s->messages[s->count-4].text,"page"));loina_job_free(j);
+    tool_chat=7;tool_step=0;request.prompt="Search again for missing details";
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK && web_calls==11);
+    check(strstr(loina_job_result(j),"second search"));loina_job_free(j);
+    tool_chat=8;tool_step=0;request.prompt="Stream reasoning before the answer";
+    visible=(loina_buffer){0};
+    j=loina_job_create(e,&request,capture_event,&visible,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK && thinking_live);
+    check(!strcmp(visible.data,loina_job_result(j)));free(visible.data);loina_job_free(j);
+    size_t before=s->count;
+    j=loina_job_create(e,&request,cancel_event,&j,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_CANCELLED && s->count==before);loina_job_free(j);
+    tool_chat=9;tool_step=0;request.prompt="Finish an answer after a reasoning cutoff";
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK);
+    check(strstr(loina_job_result(j),"available sources") && strstr(s->messages[s->count-3].text,"</think>"));
+    check(j->request.tools && j->request.thinking);loina_job_free(j);tool_chat=0;
+    tool_chat=10;tool_step=0;request.prompt="A model reply containing two search calls";
+    before=s->count;
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK && web_calls==12);
+    check(strstr(loina_job_result(j),"The page says so") && s->count==before+4);
+    check(!strstr(s->messages[before+1].text,"unused"));
+    check(strstr(s->messages[before+2].text,"Only the first requested function"));loina_job_free(j);
+    tool_chat=11;tool_step=0;request.prompt="A tool call with a non-tool suffix";
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK && web_calls==12);
+    check(strstr(s->messages[s->count-2].text,"Invalid function format"));loina_job_free(j);tool_chat=0;
     check(!loina_session_load(e,"../escape",&error));
     int sessions=0;check(!loina_session_list(e,count_session,&sessions,&error));check(sessions>=1);
     check(loina_path(path,argv[1],"outputs","sample.png"));

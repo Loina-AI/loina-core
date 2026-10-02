@@ -90,6 +90,7 @@ typedef struct {
     uint32_t seed;
     int width, height, steps;
     bool tools;
+    bool thinking;                /* Default on; MiniCPM uses its template control. */
 } loina_request;
 
 size_t loina_catalog_count(void);
