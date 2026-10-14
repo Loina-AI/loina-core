@@ -85,7 +85,9 @@ LFM uses temperature 0.2, top-k 50, top-p 1.0, min-p 0, and no repetition
 penalty, following [Liquid AI's model card](https://huggingface.co/LiquidAI/LFM2.5-VL-3B).
 Web tools use flat JSON definitions in the system prompt, native Python-style
 calls between `<|tool_call_start|>` and `<|tool_call_end|>`, and the `tool` role
-for results. LFM does not expose a thinking mode.
+for results. LFM does not expose a thinking mode. The general `thinking` request
+option remains available to runtime adapters, along with streaming reasoning and
+recovery when a reasoning response reaches its token limit.
 
 The chat package contains only the language weights. The vision package
 reuses those installed weights and downloads `mmproj-BF16.gguf` when the host

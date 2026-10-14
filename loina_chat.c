@@ -18,6 +18,16 @@ bool loina_chat_compact(loina_session *s, loina_job *job) {
 static void extraction_event(void *user, loina_event event, const char *text, size_t n, int progress) {
     if (event!=LOINA_TOKEN && event!=LOINA_FINISHED) loina_emit(user,event,text,n,progress);
 }
+static const char *chat_answer(const char *reply) {
+    while (isspace((unsigned char)*reply)) reply++;
+    if (!strncmp(reply,"<think>",7)) {
+        const char *end=strstr(reply+7,"</think>");
+        if (!end) return NULL;
+        reply=end+8;
+        while (isspace((unsigned char)*reply)) reply++;
+    }
+    return reply;
+}
 static const char *skip_space(const char *s) {
     while (isspace((unsigned char)*s)) s++;
     return s;
@@ -54,13 +64,16 @@ fail:
 }
 typedef struct { bool search; char *argument; } tool_call;
 static bool tool_like(const char *reply) {
-    reply=skip_space(reply);
+    reply=reply ? chat_answer(reply) : NULL;
+    if (!reply || !*reply) return false;
     const char *marker="<|tool_call_start|>";
     size_t n=strlen(reply),prefix=strlen(marker);
     return n && !strncmp(reply,marker,n<prefix ? n : prefix);
 }
 static int tool_requests(const char *reply, tool_call calls[4]) {
     int count=0;
+    reply=chat_answer(reply);
+    if (!reply) return 0;
     if (!take(&reply,"<|tool_call_start|>") || !take(&reply,"[")) return 0;
     do {
         if (count==4) goto fail;
@@ -82,6 +95,7 @@ typedef struct {
     loina_event_fn event;
     void *user;
     loina_buffer pending;
+    size_t sent;
     bool visible, hidden, failed;
 } chat_stream;
 static void chat_event(void *user, loina_event event, const char *text, size_t n, int progress) {
@@ -90,20 +104,36 @@ static void chat_event(void *user, loina_event event, const char *text, size_t n
     if (event!=LOINA_TOKEN || s->visible) { s->event(s->user,event,text,n,progress);return; }
     if (s->hidden || s->failed) return;
     if (!loina_buffer_add(&s->pending,text,n)) { s->failed=true;return; }
-    const char *answer=skip_space(s->pending.data);
+    const char *answer=s->pending.data;
+    while (isspace((unsigned char)*answer)) answer++;
+    if (!strncmp(answer,"<think>",7)) {
+        const char *end=strstr(answer+7,"</think>");
+        /* Keep only the possible closing tag unshown. Reasoning is visible
+         * while it is generated; tool calls still wait for classification. */
+        size_t ready=end ? (size_t)(end+8-s->pending.data) : s->pending.length-7;
+        if (ready>s->sent) {
+            s->event(s->user,LOINA_TOKEN,s->pending.data+s->sent,ready-s->sent,0);
+            s->sent=ready;
+        }
+        if (!end) return;
+        answer=end+8;
+        while (isspace((unsigned char)*answer)) answer++;
+    }
     if (!*answer) return;
-    const char *marker="<|tool_call_start|>";
-    size_t have=strlen(answer),prefix=strlen(marker);
-    if (have<prefix && !strncmp(answer,marker,have)) return;
-    if (!strncmp(answer,marker,prefix)) { s->hidden=true;return; }
+    const char *prefixes[]={"<think>","<|tool_call_start|>",NULL};
+    for (int i=0;prefixes[i];i++) {
+        size_t have=strlen(answer),prefix=strlen(prefixes[i]);
+        if (have<prefix && !strncmp(answer,prefixes[i],have)) return;
+        if (i && have>=prefix && !strncmp(answer,prefixes[i],prefix)) { s->hidden=true;return; }
+    }
     s->visible=true;
-    s->event(s->user,LOINA_TOKEN,s->pending.data,s->pending.length,0);
+    s->event(s->user,LOINA_TOKEN,s->pending.data+s->sent,s->pending.length-s->sent,0);
     free(s->pending.data);s->pending=(loina_buffer){0};
 }
 loina_status loina_chat(loina_job *job, loina_error *error) {
     loina_engine *e=job->engine;
     loina_request *r=&job->request;
-    bool tools=r->tools;
+    bool tools=r->tools,thinking=r->thinking;
     loina_session *s=r->session;
     bool temporary=!s;
     if (!s) s=loina_session_create(e,"transient",error);
@@ -115,7 +145,7 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
     loina_status status=LOINA_OK;
     if (r->feature==LOINA_VISION && !temporary) {
         loina_request vr=*r;
-        vr.session=NULL;vr.tools=false;
+        vr.session=NULL;vr.tools=false;vr.thinking=false;
         vr.prompt="Describe this image and extract its visible text faithfully. Include details needed to answer questions about it.";
         loina_job *vision=loina_job_create(e,&vr,extraction_event,job,error);
         if (!vision) { status=error ? error->code : LOINA_MEMORY;goto done; }
@@ -150,39 +180,47 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
      * without tools. Repeated navigation must not replace the answer. */
     int requests=0,searches=0,failures=0;
     for (int round=0;round<6;round++) {
-        if (round==5) r->tools=false;
+        if (round==5) { r->tools=false;r->thinking=false; }
         chat_stream stream={.event=job->event,.user=job->user};
         job->event=chat_event;job->user=&stream;
         status=e->runtime->chat(e->model,s,job,&reply,error);
         job->event=stream.event;job->user=stream.user;
-        if (!stream.hidden && !stream.failed && stream.pending.length && !tool_like(stream.pending.data))
-            loina_emit(job,LOINA_TOKEN,stream.pending.data,stream.pending.length,0);
+        if (!stream.hidden && !stream.failed && stream.pending.length>stream.sent && !tool_like(stream.pending.data))
+            loina_emit(job,LOINA_TOKEN,stream.pending.data+stream.sent,stream.pending.length-stream.sent,0);
         free(stream.pending.data);
         if (stream.failed && !status) status=loina_fail(error,LOINA_MEMORY,"Cannot buffer chat output");
         if (status) break;
         tool_call calls[4]={0};
         int count=tool_requests(reply,calls);
         bool malformed=!count && tool_like(reply);
-        bool unfinished=!*skip_space(reply);
+        const char *answer=chat_answer(reply);
+        bool unfinished=!answer || !*answer;
         if (!count && !malformed && !unfinished) break;
-        if (!r->tools) {
+        if (round==5 || (!r->tools && !unfinished)) {
             for (int i=0;i<count;i++) free(calls[i].argument);
-            status=loina_fail(error,LOINA_RUNTIME_ERROR,"The model did not finish an answer");break;
+            status=loina_fail(error,LOINA_RUNTIME_ERROR,"The model did not finish an answer; try with thinking disabled");break;
+        }
+        if (unfinished && strstr(reply,"<think>") && !strstr(reply,"</think>")) {
+            loina_buffer completed={0};
+            if (!loina_buffer_puts(&completed,reply) || !loina_buffer_puts(&completed,"\n</think>")) {
+                free(completed.data);status=loina_fail(error,LOINA_MEMORY,"Cannot retain reasoning");break;
+            }
+            free(reply);reply=completed.data;
         }
         loina_buffer results={0};
         loina_emit(job,LOINA_TOOL,"",0,0);
         if (!count) {
             const char *message=malformed ?
                 "Tool error: Invalid function format. Use <|tool_call_start|>[web_search(query=\"search terms\")]<|tool_call_end|> or <|tool_call_start|>[web_visit(url=\"https://url\")]<|tool_call_end|>." :
-                "Tool error: The response budget ended. Answer directly using the available evidence.";
+                "Tool error: The response budget ended. Answer the user's question directly using the available evidence. Do not call tools.";
             if (!loina_buffer_puts(&results,message)) status=LOINA_MEMORY;
-            if (unfinished || ++failures>=2) r->tools=false;
+            if (unfinished || ++failures>=2) { r->tools=false;r->thinking=false; }
         }
         for (int i=0;i<count && !status;i++) {
             char *document=NULL;
             if (requests>=4 || (calls[i].search && searches>=2)) {
                 document=loina_strdup("Tool error: No more web requests are available. Answer from the sources already returned.");
-                r->tools=false;
+                r->tools=false;r->thinking=false;
             } else {
                 requests++;if (calls[i].search) searches++;
                 status=calls[i].search ? loina_web_search(e,calls[i].argument,&document,job,error) :
@@ -196,7 +234,7 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
             }
             if (!status && !document) status=LOINA_MEMORY;
             if (!status) {
-                if (!strncmp(document,"Tool error:",11) && ++failures>=2) r->tools=false;
+                if (!strncmp(document,"Tool error:",11) && ++failures>=2) { r->tools=false;r->thinking=false; }
                 if ((i && !loina_buffer_puts(&results,"\n\n")) || !loina_buffer_puts(&results,document)) status=LOINA_MEMORY;
             }
             free(document);
@@ -215,7 +253,7 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
     }
     if (!status) { job->result=reply;reply=NULL; }
 done:
-    r->tools=tools;
+    r->tools=tools;r->thinking=thinking;
     if (status) {
         loina_session_truncate(s,original);s->first=old_first;strcpy(s->package_id,old_package);
         e->cache_session[0]=e->cache_transcript[0]=0;

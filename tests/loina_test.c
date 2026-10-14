@@ -5,6 +5,7 @@
 
 #define check(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while (0)
 static int loaded,unloaded,restored,reset_count,web_calls,tool_chat,tool_step;
+static bool thinking_live;
 static unsigned backends(void) { return LOINA_CPU|LOINA_VULKAN|LOINA_OPENCL; }
 static void *load(loina_engine *e, const loina_package *p, loina_job *j, loina_error *error) {
     (void)e;(void)p;(void)j;(void)error;loaded++;return malloc(1);
@@ -20,9 +21,9 @@ static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, lo
         *out=loina_strdup(!j->request.tools ? "Answer from the available sources." :
             tool_chat==6 ? (step==0 ? search : step==1 ? visit : "Answer using the first result despite the failed page.") :
             tool_chat==7 ? (step<2 ? search : "Answer using the second search result.") :
-            tool_chat==8 ? "First. Second. Third. Fourth. Answer." :
-            tool_chat==9 ? "" :
-            tool_chat==10 && step==0 ? "<|tool_call_start|>[web_search(query=\"test\"), web_visit(url=\"https://example.com/?a=1&b=2\")]<|tool_call_end|>Checking both sources." :
+            tool_chat==8 ? "<think>First. Second. Third. Fourth.</think>\nAnswer." :
+            tool_chat==9 ? "<think>Reasoning that reached the token limit" :
+            tool_chat==10 && step==0 ? "<think>Find current facts.</think>\n<|tool_call_start|>[web_search(query=\"test\"), web_visit(url=\"https://example.com/?a=1&b=2\")]<|tool_call_end|>Checking both sources." :
             tool_chat==11 && step==0 ? "<|tool_call_start|>[web_search(query=__import__('os').system('id'))]<|tool_call_end|>" :
             tool_chat==12 && step==0 ? "<|tool_call_start|>[web_search(query=\"test\"), web_search(query=\"broken\")]" :
             tool_chat==13 && step==0 ? "<|tool_call_start|>[web_search(query='test'), unknown(query='test')]<|tool_call_end|>" :
@@ -48,6 +49,7 @@ static void capture_event(void *user, loina_event type, const char *text, size_t
     if (type==LOINA_TOKEN) {
         loina_buffer *b=user;
         check(loina_buffer_add(b,text,n));
+        if (strstr(b->data,"Third.") && !strstr(b->data,"</think>")) thinking_live=true;
     }
     if (type==LOINA_TOOL) { loina_buffer *b=user;free(b->data);*b=(loina_buffer){0}; }
 }
@@ -154,7 +156,7 @@ int main(int argc, char **argv) {
     check(!loina_chat_compact(s,NULL));
     loina_session_truncate(s,0);s->first=0;
     loina_request request=loina_request_default(LOINA_TEXT);
-    check(request.temperature==0.2f && request.top_p==1.0f && request.min_p==0.0f);
+    check(request.temperature==0.2f && request.top_p==1.0f && request.min_p==0.0f && request.thinking);
     request.package=&p;request.session=s;request.prompt="hello";
     loina_job *j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_OK);check(!strcmp(loina_job_result(j),"fixture"));
@@ -219,19 +221,19 @@ int main(int argc, char **argv) {
     j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_OK && web_calls==11);
     check(strstr(loina_job_result(j),"second search"));loina_job_free(j);
-    tool_chat=8;tool_step=0;request.prompt="Stream a plain answer";
+    tool_chat=8;tool_step=0;request.prompt="Stream reasoning before the answer";
     visible=(loina_buffer){0};
     j=loina_job_create(e,&request,capture_event,&visible,&error);check(j);
-    check(loina_job_run(j,&error)==LOINA_OK);
+    check(loina_job_run(j,&error)==LOINA_OK && thinking_live);
     check(!strcmp(visible.data,loina_job_result(j)));free(visible.data);loina_job_free(j);
     size_t before=s->count;
     j=loina_job_create(e,&request,cancel_event,&j,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_CANCELLED && s->count==before);loina_job_free(j);
-    tool_chat=9;tool_step=0;request.prompt="Finish an answer after an empty response";
+    tool_chat=9;tool_step=0;request.prompt="Finish an answer after a reasoning cutoff";
     j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_OK);
-    check(strstr(loina_job_result(j),"available sources"));
-    check(j->request.tools);loina_job_free(j);tool_chat=0;
+    check(strstr(loina_job_result(j),"available sources") && strstr(s->messages[s->count-3].text,"</think>"));
+    check(j->request.tools && j->request.thinking);loina_job_free(j);tool_chat=0;
     tool_chat=10;tool_step=0;request.prompt="A model reply containing two search calls";
     before=s->count;
     j=loina_job_create(e,&request,NULL,NULL,&error);check(j);

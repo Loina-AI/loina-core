@@ -90,6 +90,7 @@ typedef struct {
     uint32_t seed;
     int width, height, steps;
     bool tools;
+    bool thinking;               /* Default on; available to model adapters. */
     float strength;              /* Img2img noise strength, 0-1; default 0.75. */
 } loina_request;
 
