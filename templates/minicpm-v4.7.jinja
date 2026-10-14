@@ -126,6 +126,7 @@
         {%- if not loop.last and loop.nextitem.role != "tool" %}
             {{- '<|im_end|>\n' }}
         {%- elif loop.last %}
+            {{- '\n\nUse the tool evidence to answer this original user question. Use the response language requested by the user, otherwise the language of this question:\n' + (render_content(messages[ns.last_query_index].content)|trim) }}
             {{- '<|im_end|>\n' }}
         {%- endif %}
     {%- else %}

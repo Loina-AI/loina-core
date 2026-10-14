@@ -5,12 +5,14 @@
 
 #define check(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while (0)
 
-static char *render(llama_jinja *tmpl, const char *tools, bool thinking, bool history) {
+static char *render(llama_jinja *tmpl, const char *tools, bool thinking, bool history, const char *question) {
     loina_buffer b={0};
     check(loina_buffer_puts(&b,"{\"bos_token\":\"<s>\",\"eos_token\":\"</s>\",\"add_generation_prompt\":true,\"enable_thinking\":"));
     check(loina_buffer_puts(&b,thinking ? "true" : "false"));
     check(loina_buffer_puts(&b,",\"tools\":") && loina_buffer_puts(&b,tools));
-    check(loina_buffer_puts(&b,",\"messages\":[{\"role\":\"system\",\"content\":\"Local assistant.\"},{\"role\":\"user\",\"content\":\"Search today.\"}"));
+    check(loina_buffer_puts(&b,",\"messages\":[{\"role\":\"system\",\"content\":\"Local assistant.\"}"));
+    if (history) check(loina_buffer_puts(&b,",{\"role\":\"user\",\"content\":\"An earlier question.\"},{\"role\":\"assistant\",\"content\":\"An earlier answer.\"}"));
+    check(loina_buffer_puts(&b,",{\"role\":\"user\",\"content\":") && loina_buffer_json(&b,question) && loina_buffer_puts(&b,"}"));
     if (history) check(loina_buffer_puts(&b,",{\"role\":\"assistant\",\"content\":\"<think>Check sources.</think>\",\"tool_calls\":[{\"function\":{\"name\":\"web_search\",\"arguments\":{\"query\":\"test\"}}}]},{\"role\":\"tool\",\"content\":\"Source says 42.\"}"));
     check(loina_buffer_puts(&b,"]}"));
     char error[512]="";
@@ -30,16 +32,28 @@ int main(int argc, char **argv) {
         llama_jinja *tmpl=llama_jinja_create(source,message,sizeof(message));
         if (!tmpl) fprintf(stderr,"%s\n",message);
         check(tmpl);free(source);
-        char *prompt=render(tmpl,"[]",true,false);
+        char *prompt=render(tmpl,"[]",true,false,"Search today.");
         check(!strcmp(prompt+strlen(prompt)-8,"<think>\n"));
         check(!strstr(prompt,"# Tools"));free(prompt);
-        prompt=render(tmpl,tools,false,false);
+        prompt=render(tmpl,tools,false,false,"Search today.");
         check(!strcmp(prompt+strlen(prompt)-19,"<think>\n\n</think>\n\n"));
         check(strstr(prompt,"# Tools") && strstr(prompt,"\"type\": \"function\"") && strstr(prompt,"web_search"));free(prompt);
-        prompt=render(tmpl,tools,true,true);
+        prompt=render(tmpl,tools,true,true,"Search today.");
         check(strstr(prompt,"<tool_response>\nSource says 42.\n</tool_response>"));
         check(strstr(prompt,i ? "<function name=\"web_search\">" : "<function=web_search>"));
         check(strstr(prompt,"<think>\nCheck sources.\n</think>"));free(prompt);
+        const char *questions[]={"What does the source say?","Что сообщает источник?","¿Qué dice la fuente?","来源说了什么？",
+            "Come gestire la nausea in gravidanza?","¿Qué dice la fuente? Answer in English."};
+        for (size_t q=0;q<sizeof(questions)/sizeof(*questions);q++) for (int thinking=0;thinking<2;thinking++) {
+            prompt=render(tmpl,tools,thinking,true,questions[q]);
+            const char *evidence=strstr(prompt,"</tool_response>");check(evidence);
+            const char *reminder=strstr(evidence,"Use the response language requested by the user");check(reminder);
+            const char *question=strstr(reminder,questions[q]);check(question);
+            check(strstr(question,"<|im_end|>\n<|im_start|>assistant\n<think>"));
+            check(!strstr(reminder,"An earlier question."));free(prompt);
+            prompt=render(tmpl,tools,thinking,false,questions[q]);
+            check(!strstr(prompt,"Use the response language requested by the user"));free(prompt);
+        }
         check(!llama_jinja_render(tmpl,"{broken",message,sizeof(message)) && *message);
         llama_jinja_free(tmpl);
     }

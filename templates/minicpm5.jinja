@@ -96,6 +96,9 @@
         {%- endif %}
         {{- '\n</tool_response>' }}
         {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}
+            {%- if loop.last %}
+                {{- '\n\nUse the tool evidence to answer this original user question. Use the response language requested by the user, otherwise the language of this question:\n' + messages[ns.last_query_index].content }}
+            {%- endif %}
             {{- '<|im_end|>\n' }}
         {%- endif %}
     {%- endif %}

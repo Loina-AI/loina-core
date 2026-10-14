@@ -13,6 +13,9 @@ The model templates come from OpenBMB's tokenizer sources:
 - [MiniCPM-V-4.7-1B, revision b0918c7](https://huggingface.co/openbmb/MiniCPM-V-4.7-1B/blob/b0918c741c57aeec539bfa277db764088cfc18e3/chat_template.jinja)
 - [MiniCPM5-2B, revision f974000](https://huggingface.co/openbmb/MiniCPM5-2B/blob/f97400052a43d642bbc6e9975e2397e3ae6a6b52/chat_template.jinja)
 
+Loina repeats the latest user question after tool results: the native templates
+encode those results as user turns, which can otherwise change the answer language.
+
 To switch a catalog model, update its artifact definitions and `template` in
 `tools/catalog.cjs`, then regenerate the catalog. A package without an explicit
 template uses its GGUF `tokenizer.chat_template`. Model templates receive
