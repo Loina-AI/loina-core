@@ -124,9 +124,8 @@ loina_status loina_preload(loina_engine *e, loina_feature feature, loina_job *jo
     return status;
 }
 loina_request loina_request_default(loina_feature feature) {
-    /* MiniCPM5's model card warns that min_p=0.05 can trap generation in loops. */
-    return (loina_request){.feature=feature,.max_tokens=512,.temperature=1.0f,
-        .top_p=0.95f,.min_p=0.0f,.seed=UINT32_MAX,.width=512,.height=512,.steps=8,.thinking=true};
+    return (loina_request){.feature=feature,.max_tokens=512,.temperature=0.2f,
+        .top_p=1.0f,.min_p=0.0f,.seed=UINT32_MAX,.width=1024,.height=1024,.steps=2,.strength=0.75f};
 }
 loina_job *loina_job_create(loina_engine *e, const loina_request *r, loina_event_fn event, void *user, loina_error *error) {
     if (!e || !r || r->feature<LOINA_TEXT || r->feature>LOINA_SPEECH ||
@@ -138,7 +137,8 @@ loina_job *loina_job_create(loina_engine *e, const loina_request *r, loina_event
         ((r->feature==LOINA_TEXT || r->feature==LOINA_VISION || r->feature==LOINA_IMAGE) && (!r->prompt || !*r->prompt)) ||
         ((r->feature==LOINA_VISION || r->feature==LOINA_SPEECH) && (!r->input_path || !*r->input_path)) ||
         (r->feature==LOINA_IMAGE && (!r->output_path || r->width<64 || r->height<64 ||
-            r->width>1024 || r->height>1024 || r->width%64 || r->height%64 || r->steps<1 || r->steps>8))) {
+            r->width>1024 || r->height>1024 || r->width%32 || r->height%32 || r->steps<1 || r->steps>4 ||
+            !isfinite(r->strength) || r->strength<0 || r->strength>1))) {
         loina_fail(error,LOINA_INVALID,"Invalid inference request"); return NULL;
     }
     if (r->prompt && strlen(r->prompt)>LOINA_MAX_TEXT/2) { loina_fail(error,LOINA_INVALID,"Prompt is too large"); return NULL; }

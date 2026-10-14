@@ -29,13 +29,18 @@ static void help(void) {
          "  --ctx N               Context size, maximum 32768\n"
          "  -n N                  Maximum generated tokens (default 512)\n"
          "  --threads N           CPU threads\n"
+         "  --backend NAME        CPU, Vulkan, OpenCL, Metal or CUDA\n"
          "  --temp F              Temperature; zero selects greedy output\n"
          "  --top-p F --min-p F    Sampling filters\n"
          "  --seed N              Sampling seed\n"
          "  --session ID          Resume a saved conversation\n"
          "  --cache-dir PATH      Packages, transcripts and KV (default .loina)\n"
          "  --vision FILE         Read an image through the vision layer\n"
-         "  --generate --out FILE Generate a 512x512 PNG with at most eight steps\n"
+         "  --generate --out FILE Generate a Sana Sprint PNG (default 1024x1024, two steps)\n"
+         "  --width N --height N  Image dimensions, 64-1024 in multiples of 32\n"
+         "  --steps N             Sana Sprint sampling steps, 1-4\n"
+         "  --img2img FILE        Generate from an image and prompt\n"
+         "  --strength F          Img2img change strength, 0-1 (default 0.75)\n"
          "  --transcribe FILE     Transcribe PCM16 mono 16kHz WAV\n"
          "REPL: /help /save /list /switch ID /del ID /read FILE /new /quit\n"
          "Browser tools are provided by the embedding host's native bridge.");
@@ -77,6 +82,7 @@ int main(int argc, char **argv) {
     loina_request request=loina_request_default(LOINA_TEXT);
     const char *package_id=NULL,*model_file=NULL,*import=NULL,*session_id=NULL,*prompt=NULL;
     bool models=false,device=false;
+    unsigned backend=0;
     for (int i=1;i<argc;i++) {
         const char *a=argv[i];
         if (!strcmp(a,"--help") || !strcmp(a,"-h")) { help();return 0; }
@@ -95,12 +101,23 @@ int main(int argc, char **argv) {
         else if (!strcmp(a,"--cache-dir")) config.directory=v;
         else if (!strcmp(a,"--ctx")) { ok=integer(v,&n);if (ok) config.context=n; }
         else if (!strcmp(a,"--threads")) { ok=integer(v,&n) && n<=64 && n>0;if (ok) config.device.threads=(int)n; }
+        else if (!strcmp(a,"--backend")) {
+            backend=!strcmp(v,"CPU") ? LOINA_CPU : !strcmp(v,"Vulkan") ? LOINA_VULKAN :
+                !strcmp(v,"OpenCL") ? LOINA_OPENCL : !strcmp(v,"Metal") ? LOINA_METAL :
+                !strcmp(v,"CUDA") ? LOINA_CUDA : 0;
+            ok=backend!=0;
+        }
         else if (!strcmp(a,"-n")) ok=integer(v,&request.max_tokens);
         else if (!strcmp(a,"--seed")) ok=integer(v,&request.seed);
         else if (!strcmp(a,"--temp")) ok=real(v,&request.temperature);
         else if (!strcmp(a,"--top-p")) ok=real(v,&request.top_p);
         else if (!strcmp(a,"--min-p")) ok=real(v,&request.min_p);
+        else if (!strcmp(a,"--width")) { ok=integer(v,&n) && n<=1024;if (ok) request.width=(int)n; }
+        else if (!strcmp(a,"--height")) { ok=integer(v,&n) && n<=1024;if (ok) request.height=(int)n; }
+        else if (!strcmp(a,"--steps")) { ok=integer(v,&n) && n<=4;if (ok) request.steps=(int)n; }
         else if (!strcmp(a,"--vision")) { request.feature=LOINA_VISION;request.input_path=v; }
+        else if (!strcmp(a,"--img2img")) { request.feature=LOINA_IMAGE;request.input_path=v; }
+        else if (!strcmp(a,"--strength")) ok=real(v,&request.strength);
         else if (!strcmp(a,"--transcribe")) { request.feature=LOINA_SPEECH;request.input_path=v; }
         else if (!strcmp(a,"--out")) request.output_path=v;
         else { fprintf(stderr,"Unknown option: %s\n",a);return 1; }
@@ -110,6 +127,9 @@ int main(int argc, char **argv) {
     loina_error error={0};
     loina_engine *engine=loina_open(&config,&error);
     if (!engine) { fprintf(stderr,"%s\n",error.message);return 1; }
+    if (backend && loina_set_backend(engine,backend,&error)) {
+        fprintf(stderr,"%s\n",error.message);loina_close(engine);return 1;
+    }
     int exitcode=0;
     if (package_id) {
         request.package=loina_catalog_find(package_id);
@@ -122,7 +142,7 @@ int main(int argc, char **argv) {
         const loina_package *found=NULL;
         for (size_t i=0;i<loina_catalog_count();i++) {
             const loina_package *p=loina_catalog_get(i);
-            if (!strcmp(p->files[0].name,base)) { found=p;break; }
+            if (p->feature==request.feature && !strcmp(p->files[0].name,base)) { found=p;break; }
         }
         if (!found || (request.package && request.package!=found)) {
             fprintf(stderr,"Unknown or conflicting model file; see --models\n");exitcode=1;goto done;
@@ -137,7 +157,7 @@ int main(int argc, char **argv) {
     if (import) {
         const loina_package *p=request.package ? request.package : loina_resolve(engine,request.feature,&error);
         if (!p || loina_install(engine,p,import,NULL,&error)) { fprintf(stderr,"%s\n",error.message);exitcode=1;goto done; }
-        if (!prompt && !models && !device) goto done;
+        if (!prompt && !models && !device && !model_file && request.feature!=LOINA_SPEECH) goto done;
     }
     if (device) {
         const loina_device *d=loina_get_device(engine);

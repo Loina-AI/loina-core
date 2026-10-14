@@ -78,6 +78,26 @@ bool loina_package_installed(loina_engine *e, const loina_package *p) {
     return true;
 }
 
+static bool installed_artifact(loina_engine *e, const loina_artifact *a, char source[LOINA_PATH]) {
+    for (size_t i=0;i<loina_catalog_count();i++) {
+        const loina_package *p=loina_catalog_get(i);
+        for (size_t j=0;j<p->file_count;j++) {
+            const loina_artifact *b=&p->files[j];
+            if (a->bytes==b->bytes && !strcmp(a->sha256,b->sha256) && loina_package_installed(e,p))
+                return loina_artifact_path(e,p,j,source);
+        }
+    }
+    return false;
+}
+uint64_t loina_package_download_bytes(loina_engine *e, const loina_package *p) {
+    if (!e || !loina_package_valid(p)) return UINT64_MAX;
+    uint64_t total=0;
+    char source[LOINA_PATH];
+    for (size_t i=0;i<p->file_count;i++)
+        if (!installed_artifact(e,&p->files[i],source)) total+=p->files[i].bytes;
+    return total;
+}
+
 loina_status loina_install(loina_engine *e, const loina_package *p, const char *import,
                           loina_job *job, loina_error *error) {
     if (!e || !loina_package_valid(p)) return loina_fail(error,LOINA_INVALID,"Invalid package manifest");
@@ -102,8 +122,13 @@ loina_status loina_install(loina_engine *e, const loina_package *p, const char *
             if (!loina_path(source,import,a->name,NULL)) { status=LOINA_INVALID; goto done; }
             status=loina_copy(source,path,job,a->bytes,error);
         } else if (loina_file_bytes(path)!=a->bytes) {
-            if (!e->config.fetch || !a->url || !*a->url) { status=loina_fail(error,LOINA_UNSUPPORTED,"%s requires local import or a download bridge",a->name); goto done; }
-            status=e->config.fetch(e->config.user,a,path,job,error);
+            /* Text and vision share immutable weights. Reuse the installed
+             * artifact, then hash it again before publishing the new package. */
+            if (installed_artifact(e,a,source)) status=loina_copy(source,path,job,a->bytes,error);
+            else {
+                if (!e->config.fetch || !a->url || !*a->url) { status=loina_fail(error,LOINA_UNSUPPORTED,"%s requires local import or a download bridge",a->name); goto done; }
+                status=e->config.fetch(e->config.user,a,path,job,error);
+            }
         }
         if (status) goto done;
         if (loina_file_bytes(path)!=a->bytes) { status=loina_fail(error,LOINA_INTEGRITY,"Wrong artifact size: %s",a->name); goto done; }

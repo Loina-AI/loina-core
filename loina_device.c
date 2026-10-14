@@ -33,6 +33,16 @@ loina_status loina_device_probe(const char *directory, loina_device *d, loina_er
         d->ram_bytes=(uint64_t)s.totalram*s.mem_unit;
         d->available_ram_bytes=(uint64_t)s.freeram*s.mem_unit;
     }
+    /* Cached pages are reclaimable; match Android's available-memory probe. */
+    FILE *info=fopen("/proc/meminfo","r");
+    if (info) {
+        char line[128];unsigned long long kb;
+        while (fgets(line,sizeof(line),info)) if (sscanf(line,"MemAvailable: %llu",&kb)==1) {
+            if (kb<=d->ram_bytes/1024) d->available_ram_bytes=(uint64_t)kb*1024;
+            break;
+        }
+        fclose(info);
+    }
 #elif defined(__APPLE__)
     size_t size=sizeof(d->ram_bytes);
     sysctlbyname("hw.memsize",&d->ram_bytes,&size,NULL,0);

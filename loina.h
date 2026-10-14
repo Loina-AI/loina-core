@@ -45,7 +45,7 @@ typedef struct {
 typedef struct loina_engine loina_engine;
 typedef struct loina_session loina_session;
 typedef struct loina_job loina_job;
-typedef enum { LOINA_SYSTEM, LOINA_USER, LOINA_ASSISTANT } loina_role;
+typedef enum { LOINA_SYSTEM, LOINA_USER, LOINA_ASSISTANT, LOINA_TOOL_RESULT } loina_role;
 typedef enum { LOINA_MESSAGE_TEXT, LOINA_MESSAGE_IMAGE } loina_message_kind;
 typedef struct {
     loina_role role;
@@ -83,14 +83,14 @@ typedef struct {
     const loina_package *package; /* NULL asks the core resolver. */
     loina_session *session;
     const char *prompt;
-    const char *input_path;       /* Vision image or mono 16kHz PCM16 WAV. */
+    const char *input_path;       /* Vision/img2img image or mono 16kHz PCM16 WAV. */
     const char *output_path;      /* Image PNG output. */
     uint32_t max_tokens;
     float temperature, top_p, min_p;
     uint32_t seed;
     int width, height, steps;
     bool tools;
-    bool thinking;                /* Default on; MiniCPM uses its template control. */
+    float strength;              /* Img2img noise strength, 0-1; default 0.75. */
 } loina_request;
 
 size_t loina_catalog_count(void);
@@ -108,6 +108,7 @@ const loina_package *loina_resolve(loina_engine *engine, loina_feature feature, 
 bool loina_package_installed(loina_engine *engine, const loina_package *package);
 bool loina_package_compatible(loina_engine *engine, const loina_package *package);
 uint64_t loina_package_bytes(const loina_package *package);
+uint64_t loina_package_download_bytes(loina_engine *engine, const loina_package *package);
 /* Files are staged, size/hash checked, then committed by directory rename.
  * An installed identity is never overwritten. Import uses artifact filenames. */
 loina_status loina_install(loina_engine *engine, const loina_package *package,

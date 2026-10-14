@@ -78,7 +78,6 @@ bool loina_artifact_path(loina_engine *, const loina_package *, size_t, char pat
 bool loina_session_add(loina_session *, loina_role, loina_message_kind, const char *);
 void loina_session_truncate(loina_session *, size_t);
 bool loina_chat_compact(loina_session *, loina_job *);
-char *loina_chat_prompt_minicpm5(loina_session *, const char *, bool);
 loina_status loina_chat(loina_job *, loina_error *);
 bool loina_cache_restore(loina_engine *, loina_session *);
 bool loina_cache_save(loina_engine *, loina_session *);
@@ -93,6 +92,7 @@ extern const loina_runtime loina_diffusion;
 #endif
 #ifdef LOINA_WITH_SPEECH
 extern const loina_runtime loina_speech;
+struct parakeet_context *loina_parakeet_load(const char *, bool, loina_job *);
 #endif
 #ifdef LOINA_TEST
 extern const loina_runtime loina_test_runtime;

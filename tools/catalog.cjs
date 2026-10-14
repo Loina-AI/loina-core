@@ -5,14 +5,14 @@ const crypto = require('node:crypto');
 const core = path.resolve(__dirname, '..');
 const models = path.resolve(core, '..', 'models');
 const specs = [
-  { repo: 'bartowski/MiniCPM5-2B-GGUF', name: 'MiniCPM5 2B · Bartowski Q4', feature: 'LOINA_TEXT', runtime: 'llama', quality: 4, memory: 2800000000, license: 'Apache-2.0', files: ['MiniCPM5-2B-Q4_K_M.gguf'] },
-  { repo: 'LiquidAI/LFM2.5-VL-450M-Extract-GGUF', name: 'LFM 2.5 · Vision', feature: 'LOINA_VISION', runtime: 'llama', quality: 4, memory: 1400000000, license: 'LFM Open License v1.0', files: ['LFM2.5-VL-450M-Extract-Q4_K_M.gguf', 'mmproj-LFM2.5-VL-450M-Extract-F16.gguf'] },
-  { repo: 'ggml-org/parakeet-GGUF', name: 'Parakeet v3 · Speech', feature: 'LOINA_SPEECH', runtime: 'parakeet', quality: 4, memory: 1800000000, license: 'CC-BY-4.0', files: ['ggml-parakeet-tdt-0.6b-v3-q4_k.bin'] },
-  { repo: 'calcuis/sd3.5-lite-gguf', name: 'SD 3.5 Lite · Images', feature: 'LOINA_IMAGE', runtime: 'diffusion', quality: 4, memory: 5000000000, license: 'Stability AI Community License', files: [
-    'sd3.5-2b-lite-q4_k_m.gguf',
-    { name: 'clip_l-Q4_0.gguf', repo: 'second-state/stable-diffusion-3.5-medium-GGUF' },
-    { name: 'clip_g-Q4_0.gguf', repo: 'second-state/stable-diffusion-3.5-medium-GGUF' },
-    { name: 'sd3.5_vae.safetensors', repo: 'ckpt/stable-diffusion-3.5-medium', remote: 'vae/diffusion_pytorch_model.safetensors' }
+  { repo: 'unsloth/LFM2.5-VL-3B-GGUF', revision: '22f063714556bd4daa81c40dc1ff15ca37ae92ea', name: 'LFM 2.5 VL 3B · Chat', feature: 'LOINA_TEXT', runtime: 'llama', quality: 4, memory: 3000000000, license: 'LFM Open License v1.0', files: ['LFM2.5-VL-3B-Q4_K_M.gguf'] },
+  { repo: 'unsloth/LFM2.5-VL-3B-GGUF', revision: '22f063714556bd4daa81c40dc1ff15ca37ae92ea', name: 'LFM 2.5 VL 3B · Vision', feature: 'LOINA_VISION', runtime: 'llama', quality: 4, memory: 4000000000, license: 'LFM Open License v1.0', files: ['LFM2.5-VL-3B-Q4_K_M.gguf', 'mmproj-BF16.gguf'] },
+  { repo: 'cstr/parakeet-tdt-0.6b-v3-GGUF', revision: 'dff69b0e675921ffd5a6133f5fbe2aac690d3ec3', name: 'Parakeet v3 · Speech', feature: 'LOINA_SPEECH', runtime: 'parakeet', quality: 4, memory: 1800000000, license: 'CC-BY-4.0', files: ['parakeet-tdt-0.6b-v3-q4_k.gguf'] },
+  { repo: 'Ninnix96/Sana-Sprint-0.6B-1024px-GGUF', revision: '45354700952b46b47674b05a372557526b2653ad', source: 'Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers', source_revision: 'aa76e7f4f4928f378716b6716a2130fba3caf5b1', name: 'Sana Sprint 0.6B · Images', feature: 'LOINA_IMAGE', runtime: 'diffusion', quality: 4, memory: 5000000000, license: 'Apache-2.0; MIT; Gemma Terms of Use', files: [
+    { name: 'sana-sprint-q8_0.gguf', repo: 'Ninnix96/Sana-Sprint-0.6B-1024px-GGUF', local: 'sana-sprint-q8_0.gguf' },
+    { name: 'gemma-2-2b-it-q4_k_m.gguf', repo: 'BafS/gemma-2-2b-it-Q4_K_M-GGUF', revision: 'bcbae962f6e54f66244f4dc64cbe49a9faaef106' },
+    { name: 'dc-ae-f16.gguf', repo: 'Ninnix96/Sana-Sprint-0.6B-1024px-GGUF', local: 'dc-ae-f16.gguf' },
+    { name: 'tokenizer.json', repo: 'Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers', revision: 'aa76e7f4f4928f378716b6716a2130fba3caf5b1', remote: 'tokenizer/tokenizer.json' }
   ] },
 ];
 
@@ -26,13 +26,14 @@ function hashFile(file) {
 async function main() {
   const records = [];
   const metadata = new Map();
-  async function repository(repo) {
-    if (!metadata.has(repo)) {
-      const response = await fetch(`https://huggingface.co/api/models/${repo}?blobs=true`);
+  async function repository(repo, revision) {
+    const key = `${repo}@${revision || 'main'}`;
+    if (!metadata.has(key)) {
+      const response = await fetch(`https://huggingface.co/api/models/${repo}${revision ? `/revision/${revision}` : ''}?blobs=true`);
       if (!response.ok) throw new Error(`${repo}: ${response.status}`);
-      metadata.set(repo, await response.json());
+      metadata.set(key, await response.json());
     }
-    return metadata.get(repo);
+    return metadata.get(key);
   }
   for (const spec of specs) {
     const files = [];
@@ -40,11 +41,15 @@ async function main() {
       const name = typeof file === 'string' ? file : file.name;
       const repo = typeof file === 'string' ? spec.repo : file.repo;
       const remoteName = typeof file === 'string' ? name : (file.remote || name);
-      const remote = repo ? await repository(repo) : null;
-      const local = path.join(models, name);
+      const revision = file.revision || (repo === spec.repo ? spec.revision : null);
+      const remote = repo ? await repository(repo, revision) : null;
+      const local = path.join(models, file.local || name);
       const sibling = remote?.siblings.find(s => s.rfilename === remoteName);
       let sha256, bytes;
-      if (sibling?.lfs) {
+      if (file.local && fs.existsSync(local)) {
+        sha256 = await hashFile(local);
+        bytes = fs.statSync(local).size;
+      } else if (sibling?.lfs) {
         sha256 = sibling.lfs.sha256;
         bytes = sibling.lfs.size;
       } else if (fs.existsSync(local)) {
@@ -54,10 +59,11 @@ async function main() {
         throw new Error(`No immutable artifact metadata for ${name}`);
       }
       const matches = sibling?.lfs?.sha256 === sha256;
+      if (file.local && !matches) throw new Error(`Published artifact does not match the prepared weights: ${name}`);
       files.push({ name, sha256, bytes, url: matches ? `https://huggingface.co/${repo}/resolve/${remote.sha}/${remoteName}` : '' });
     }
     const identity = crypto.createHash('sha256').update(files.map(f => f.sha256).join(':')).digest('hex');
-    const slug = spec.files[0].replace(/\.(gguf|bin)$/, '').toLowerCase().replaceAll('.', '-');
+    const slug = files[0].name.replace(/\.(gguf|bin)$/, '').toLowerCase().replaceAll('.', '-');
     records.push({ ...spec, id: `${slug}-${identity.slice(0, 16)}`, files });
   }
   const q = JSON.stringify;

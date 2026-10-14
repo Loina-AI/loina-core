@@ -71,19 +71,50 @@ The current catalog contains:
 
 | Use | Model package |
 | --- | --- |
-| Chat | MiniCPM5 2B, Q4_K_M |
-| Vision | LFM2.5-VL-450M-Extract, Q4_K_M, with its F16 projector |
+| Chat | LFM2.5-VL-3B, Q4_K_M |
+| Vision | The same LFM2.5-VL-3B weights with the BF16 projector |
 | Speech recognition | Parakeet TDT 0.6B v3, Q4_K |
-| Image generation | SD 3.5 Lite, Q4_K_M, with text encoders and VAE |
+| Image generation | Sana Sprint 0.6B, protected Q8_0, with Gemma 2 Q4_K_M and full FP16 DC-AE |
 
 Weights are installed separately. Each package records its source repository,
 pinned revision, filenames, hashes, sizes, license, and runtime ABI. See
 [loina_catalog.c](loina_catalog.c) for the exact artifacts. Regenerate the
-catalog with `node tools/catalog.cjs`.
+catalog with `node tools/catalog.cjs` (requires Hugging Face API access).
+
+LFM uses temperature 0.2, top-k 50, top-p 1.0, min-p 0, and no repetition
+penalty, following [Liquid AI's model card](https://huggingface.co/LiquidAI/LFM2.5-VL-3B).
+Web tools use flat JSON definitions in the system prompt, native Python-style
+calls between `<|tool_call_start|>` and `<|tool_call_end|>`, and the `tool` role
+for results. LFM does not expose a thinking mode.
+
+The chat package contains only the language weights. The vision package
+reuses those installed weights and downloads `mmproj-BF16.gguf` when the host
+requests vision. The download size excludes artifacts already installed in
+another package; the reused bytes are hashed again before installation.
+Parakeet uses the [cstr GGUF conversion](https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF).
+The C container adapter preserves mixed quantization and translates the LSTM
+gate order and biases for the existing Parakeet decoder.
 
 An embedding application provides the download callback. The reference CLI
 imports files already present on disk. For a package containing several files,
 put all of its artifacts in the same directory before importing it.
+
+Sana Sprint uses 1024×1024 images and two SCM steps by default, with distilled
+guidance 4.5. Image dimensions may be 64–1024 in multiples of 32, and sampling
+uses 1–4 steps. The package contains the denoiser, Gemma 2, the FP16 DC-AE
+encoder/decoder, and `tokenizer.json` (about 3.015 GB of model artifacts).
+For image-to-image, set `input_path` and `strength` (0–1, default 0.75).
+Strength 0 preserves the resized input; 1 starts from full noise.
+Instruction-based editing is unavailable.
+The [Sana GGUF repository](https://huggingface.co/Ninnix96/Sana-Sprint-0.6B-1024px-GGUF)
+contains the precision variants and their quantization recipe.
+
+```sh
+./build/loina --generate -m ../models/sana-sprint-q8_0.gguf \
+  -p "a red fox in a snowy forest" --out fox.png
+./build/loina --img2img input.png --strength 0.65 --out variation.png \
+  -p "a fox in a watercolor painting"
+```
 
 ## Use the command line
 
@@ -97,8 +128,11 @@ Start by inspecting the catalog and device capabilities:
 With the catalog's chat GGUF on disk, ask a question:
 
 ```sh
-./build/loina -m /path/to/MiniCPM5-2B-Q4_K_M.gguf -p "Explain radix trees."
+./build/loina -m /path/to/LFM2.5-VL-3B-Q4_K_M.gguf -p "Explain radix trees."
 ```
+
+Use `--backend CPU` or `--backend Vulkan` to test a particular available
+runtime. An unavailable backend returns an error instead of changing the choice.
 
 The first use of `-m` imports the package from the file's directory and verifies
 its artifacts. An installed package can also be selected with `--package ID`.

@@ -95,7 +95,7 @@ loina_session *loina_session_load(loina_engine *e, const char *id, loina_error *
     size_t total=0;
     for (uint32_t i=0;ok && i<count;i++) {
         uint32_t role,kind,n;
-        ok=get32(f,&role) && role<=LOINA_ASSISTANT && get32(f,&kind) && kind<=LOINA_MESSAGE_IMAGE &&
+        ok=get32(f,&role) && role<=LOINA_TOOL_RESULT && get32(f,&kind) && kind<=LOINA_MESSAGE_IMAGE &&
             get32(f,&n) && n<=LOINA_MAX_TEXT && total<=LOINA_MAX_TEXT-n;
         if (!ok) break;
         total+=n;

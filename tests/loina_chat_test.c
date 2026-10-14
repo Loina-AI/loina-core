@@ -48,13 +48,10 @@ static loina_session *copy_session(loina_engine *e, loina_session *source, const
     return s;
 }
 static const char *answer(const char *text) {
-    const char *end=strstr(text,"</think>");
-    if (end) text=end+8;
     while (isspace((unsigned char)*text)) text++;
     return text;
 }
 static bool says(const char *text, const char *word) {
-    if (strstr(text,"<think>") && !strstr(text,"</think>")) return false;
     text=answer(text);size_t n=strlen(word);
     if (strncmp(text,word,n)) return false;
     text+=n;if (*text=='.') text++;
@@ -99,6 +96,8 @@ static void signed_weights(const char *name) {
         free(input);free(output);ggml_backend_buffer_free(buffer);ggml_free(ctx);
     }
     free(weights);ggml_backend_free(backend);puts("Signed Q8 weights pass prefill and decode");
+    size_t available=0,total=0;ggml_backend_dev_memory(device,&available,&total);
+    printf("%s memory after kernel test: free=%zu total=%zu\n",name,available,total);
 }
 static void same_logits(llama_state *s, const float *want, const float *got, int32_t count) {
     /* Bound GPU rounding as well as checking the selected token; a stable
@@ -179,9 +178,13 @@ static void checkpoint_replay(loina_engine *e, const char *directory) {
         check(llama_save(s,path));
         check(llama_restore(s,path));
         same_kv(s,kv,kv_size);free(kv);
-        check(llama_memory_seq_rm(llama_get_memory(s->context),0,(llama_pos)prefix,-1));
-        for (size_t i=prefix;i<count;) {
-            size_t n=count-i;if (n>256) n=256;
+        size_t start=prefix;
+        bool rewound=llama_memory_seq_rm(llama_get_memory(s->context),0,(llama_pos)prefix,-1);
+        if (!rewound) {
+            llama_reset(s);start=0;
+        }
+        for (size_t i=start;i<count;) {
+            size_t end=i<prefix ? prefix : count,n=end-i;if (n>256) n=256;
             check(!decode(s,tokens+i,(int)n,(int)i));i+=n;
         }
         llama_synchronize(s->context);
@@ -195,6 +198,9 @@ static void checkpoint_replay(loina_engine *e, const char *directory) {
         const float *got=llama_get_logits_ith(s->context,-1);
         same_logits(s,want,got,size);
         printf("Rewind %zu matches replay\n",prefix);
+        /* Stateful models reject partial rewinds; their recovery is one
+         * full replay rather than a family of cache-boundary operations. */
+        if (!rewound) break;
     }
     free(want);free(tokens);llama_reset(s);
     e->cache_session[0]=e->cache_transcript[0]=0;
@@ -227,8 +233,8 @@ int main(int argc, char **argv) {
     char *continued=run(e,s,"How are you?",false);
     printf("Second turn: %s\n",continued);
     char *cold=run(e,reference,"How are you?",false);
-    check(strstr(continued,"</think>") && *answer(continued));
-    check(strstr(cold,"</think>") && *answer(cold));
+    check(*answer(continued));
+    check(*answer(cold));
     /* Prefill and decode use different GPU kernels and can choose different
      * words. Check exact cache bytes and numerical continuation below. */
     if (backend==LOINA_CPU) check(!strcmp(continued,cold));
@@ -238,7 +244,7 @@ int main(int argc, char **argv) {
     char *resumed=run(e,reloaded,"Reply with READY.",false);
     char *replayed=run(e,s,"Reply with READY.",false);
     printf("Restored turn: %s\nLive reference: %s\n",resumed,replayed);
-    /* A full prefill and cached decode can choose different reasoning words
+    /* A full prefill and cached decode can choose different words
      * through floating-point rounding. Their requested answer must agree. */
     check(says(resumed,"READY") && says(replayed,"READY"));free(resumed);free(replayed);
     puts("Saved conversation restores after unrelated work");
