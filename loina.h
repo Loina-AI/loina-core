@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define LOINA_ABI 1
+#define LOINA_ABI 2
 #define LOINA_MAX_FILES 4
 #define LOINA_MAX_CONTEXT 32768
 
@@ -35,6 +35,7 @@ typedef struct {
     uint64_t memory_bytes;
     size_t file_count;
     loina_artifact files[LOINA_MAX_FILES];
+    const char *chat_template;    /* Filename in templates; NULL uses GGUF metadata. */
 } loina_package;
 typedef struct {
     uint64_t ram_bytes, available_ram_bytes, storage_bytes;
@@ -77,6 +78,7 @@ typedef struct {
     loina_fetch_fn fetch;
     loina_web_fn web;
     void *user;
+    const char *template_directory; /* Optional overrides for bundled templates. */
 } loina_config;
 typedef struct {
     loina_feature feature;

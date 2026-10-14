@@ -37,6 +37,13 @@ loina_engine *loina_open(const loina_config *c, loina_error *error) {
     e->config=*c;
     strcpy(e->directory,c->directory);
     e->config.directory=e->directory;
+    if (c->template_directory) {
+        if (strlen(c->template_directory)>=sizeof(e->template_directory)) {
+            free(e);loina_fail(error,LOINA_INVALID,"Template directory is too long");return NULL;
+        }
+        strcpy(e->template_directory,c->template_directory);
+        e->config.template_directory=e->template_directory;
+    }
     e->config.context=c->context ? c->context : LOINA_MAX_CONTEXT;
     if (e->config.context<512) { loina_fail(error,LOINA_INVALID,"Context must be at least 512 tokens"); free(e); return NULL; }
     atomic_init(&e->busy,false);
@@ -67,6 +74,7 @@ void loina_unload(loina_engine *e) {
     if (e->model) e->runtime->unload(e->model);
     e->model=NULL; e->runtime=NULL; e->package=NULL;
     e->cache_session[0]=e->cache_transcript[0]=0;
+    e->chat_identity[0]=0;
 }
 void loina_close(loina_engine *e) {
     if (!e) return;
@@ -124,8 +132,8 @@ loina_status loina_preload(loina_engine *e, loina_feature feature, loina_job *jo
     return status;
 }
 loina_request loina_request_default(loina_feature feature) {
-    return (loina_request){.feature=feature,.max_tokens=512,.temperature=0.2f,
-        .top_p=1.0f,.min_p=0.0f,.seed=UINT32_MAX,.width=1024,.height=1024,.steps=2,.thinking=true,.strength=0.75f};
+    return (loina_request){.feature=feature,.max_tokens=512,.temperature=0.7f,
+        .top_p=0.95f,.min_p=0.0f,.seed=UINT32_MAX,.width=1024,.height=1024,.steps=2,.thinking=true,.strength=0.75f};
 }
 loina_job *loina_job_create(loina_engine *e, const loina_request *r, loina_event_fn event, void *user, loina_error *error) {
     if (!e || !r || r->feature<LOINA_TEXT || r->feature>LOINA_SPEECH ||

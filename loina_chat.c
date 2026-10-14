@@ -39,53 +39,71 @@ static bool take(const char **s, const char *text) {
     *s=start+n;
     return true;
 }
-static char *tool_string(const char **s) {
-    const char *p=skip_space(*s);
-    char quote=*p++;
-    if (quote!='\"' && quote!='\'') return NULL;
-    loina_buffer b={0};
-    while (*p && *p!=quote) {
-        char c=*p++;
-        if (c=='\\') {
-            c=*p++;
-            if (c=='n') c='\n';
-            else if (c=='r') c='\r';
-            else if (c=='t') c='\t';
-            else if (c!='\\' && c!='\"' && c!='\'') goto fail;
-        } else if ((unsigned char)c<32) goto fail;
-        if (b.length>=8192 || !loina_buffer_add(&b,&c,1)) goto fail;
-    }
-    if (*p!=quote || !b.length) goto fail;
-    *s=p+1;
-    return b.data;
-fail:
-    free(b.data);
-    return NULL;
-}
 typedef struct { bool search; char *argument; } tool_call;
+static const char *tool_prefixes[]={"<function","<web_search>","<web_visit>","<tool_call>","name=\"",NULL};
+static const char *tool_start(const char *reply) {
+    const char *function=strstr(reply,"<function"),*call=strstr(reply,"<tool_call>");
+    return function && (!call || function<call) ? function : call;
+}
 static bool tool_like(const char *reply) {
     reply=reply ? chat_answer(reply) : NULL;
     if (!reply || !*reply) return false;
-    const char *marker="<|tool_call_start|>";
-    size_t n=strlen(reply),prefix=strlen(marker);
-    return n && !strncmp(reply,marker,n<prefix ? n : prefix);
+    if (tool_start(reply)) return true;
+    size_t have=strlen(reply);
+    for (int i=0;tool_prefixes[i];i++) {
+        size_t n=strlen(tool_prefixes[i]);
+        if (have>=2 && !strncmp(reply,tool_prefixes[i],have<n ? have : n)) return true;
+    }
+    return false;
+}
+static bool tool_request(const char **reply, tool_call *call) {
+    bool modern=take(reply,"<tool_call>");
+    const char *search=modern ? "<function=web_search>" : "<function name=\"web_search\">";
+    const char *visit=modern ? "<function=web_visit>" : "<function name=\"web_visit\">";
+    call->search=take(reply,search);
+    if (!call->search && !take(reply,visit)) return false;
+    const char *field=modern ? (call->search ? "<parameter=query>" : "<parameter=url>") :
+        (call->search ? "<param name=\"query\">" : "<param name=\"url\">");
+    if (!take(reply,field)) return false;
+    const char *start=*reply;
+    bool cdata=!modern && !strncmp(start,"<![CDATA[",9);
+    if (cdata) start+=9;
+    const char *close=modern ? "</parameter>" : cdata ? "]]></param>" : "</param>";
+    const char *end=strstr(start,close);
+    if (!end || end-start>8192) return false;
+    *reply=end+strlen(close);
+    if (!take(reply,"</function>") || (modern && !take(reply,"</tool_call>"))) return false;
+    if (modern) {
+        while (start<end && isspace((unsigned char)*start)) start++;
+        while (end>start && isspace((unsigned char)end[-1])) end--;
+    }
+    if (start==end) return false;
+    loina_buffer b={0};
+    while (start<end) {
+        const char *entity=NULL;
+        char value=0;
+        if (!modern && !cdata && *start=='&') {
+            if (end-start>=5 && !strncmp(start,"&amp;",5)) { entity=start+5;value='&'; }
+            else if (end-start>=4 && !strncmp(start,"&lt;",4)) { entity=start+4;value='<'; }
+            else if (end-start>=4 && !strncmp(start,"&gt;",4)) { entity=start+4;value='>'; }
+            else if (end-start>=6 && !strncmp(start,"&quot;",6)) { entity=start+6;value='\"'; }
+            else if (end-start>=6 && !strncmp(start,"&apos;",6)) { entity=start+6;value='\''; }
+        }
+        if ((!cdata && !modern && *start=='<') || !loina_buffer_add(&b,entity ? &value : start,1)) { free(b.data);return false; }
+        start=entity ? entity : start+1;
+    }
+    call->argument=b.data;
+    return true;
 }
 static int tool_requests(const char *reply, tool_call calls[4]) {
     int count=0;
     reply=chat_answer(reply);
-    if (!reply) return 0;
-    if (!take(&reply,"<|tool_call_start|>") || !take(&reply,"[")) return 0;
+    if (!reply || !(reply=tool_start(reply))) return 0;
     do {
-        if (count==4) goto fail;
-        bool search=take(&reply,"web_search");
-        if (!search && !take(&reply,"web_visit")) goto fail;
-        if (!take(&reply,"(") || !take(&reply,search ? "query" : "url") || !take(&reply,"=")) goto fail;
-        char *argument=tool_string(&reply);
-        if (!argument) goto fail;
-        calls[count++]=(tool_call){search,argument};
-        if (!take(&reply,")")) goto fail;
-    } while (take(&reply,","));
-    if (!take(&reply,"]") || !take(&reply,"<|tool_call_end|>")) goto fail;
+        if (count==4 || !tool_request(&reply,&calls[count])) goto fail;
+        count++;
+        reply=skip_space(reply);
+    } while (*reply);
     return count;
 fail:
     for (int i=0;i<count;i++) { free(calls[i].argument);calls[i].argument=NULL; }
@@ -98,12 +116,33 @@ typedef struct {
     size_t sent;
     bool visible, hidden, failed;
 } chat_stream;
+static void stream_answer(chat_stream *s) {
+    const char *answer=s->pending.data+s->sent,*call=tool_start(answer);
+    size_t ready=s->pending.length;
+    if (call) { ready=(size_t)(call-s->pending.data);s->hidden=true; }
+    else {
+        /* Hold a possible XML opener across token boundaries, even after a
+         * natural-language preamble allowed by the model's tool template. */
+        size_t available=ready-s->sent,hold=0;
+        for (int i=0;tool_prefixes[i];i++) {
+            size_t n=strlen(tool_prefixes[i]);
+            for (size_t j=1;j<n && j<=available;j++)
+                if (j>hold && !strncmp(s->pending.data+ready-j,tool_prefixes[i],j)) hold=j;
+        }
+        ready-=hold;
+    }
+    if (ready>s->sent) s->event(s->user,LOINA_TOKEN,s->pending.data+s->sent,ready-s->sent,0);
+    size_t remaining=s->hidden ? 0 : s->pending.length-ready;
+    memmove(s->pending.data,s->pending.data+ready,remaining);
+    s->pending.data[remaining]=0;s->pending.length=remaining;s->sent=0;
+}
 static void chat_event(void *user, loina_event event, const char *text, size_t n, int progress) {
     chat_stream *s=user;
     if (!s->event) return;
-    if (event!=LOINA_TOKEN || s->visible) { s->event(s->user,event,text,n,progress);return; }
+    if (event!=LOINA_TOKEN) { s->event(s->user,event,text,n,progress);return; }
     if (s->hidden || s->failed) return;
     if (!loina_buffer_add(&s->pending,text,n)) { s->failed=true;return; }
+    if (s->visible) { stream_answer(s);return; }
     const char *answer=s->pending.data;
     while (isspace((unsigned char)*answer)) answer++;
     if (!strncmp(answer,"<think>",7)) {
@@ -120,15 +159,14 @@ static void chat_event(void *user, loina_event event, const char *text, size_t n
         while (isspace((unsigned char)*answer)) answer++;
     }
     if (!*answer) return;
-    const char *prefixes[]={"<think>","<|tool_call_start|>",NULL};
+    const char *prefixes[]={"<think>","<function","<web_search>","<web_visit>","<tool_call>","name=\"",NULL};
     for (int i=0;prefixes[i];i++) {
         size_t have=strlen(answer),prefix=strlen(prefixes[i]);
         if (have<prefix && !strncmp(answer,prefixes[i],have)) return;
         if (i && have>=prefix && !strncmp(answer,prefixes[i],prefix)) { s->hidden=true;return; }
     }
     s->visible=true;
-    s->event(s->user,LOINA_TOKEN,s->pending.data+s->sent,s->pending.length-s->sent,0);
-    free(s->pending.data);s->pending=(loina_buffer){0};
+    stream_answer(s);
 }
 loina_status loina_chat(loina_job *job, loina_error *error) {
     loina_engine *e=job->engine;
@@ -211,7 +249,7 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
         loina_emit(job,LOINA_TOOL,"",0,0);
         if (!count) {
             const char *message=malformed ?
-                "Tool error: Invalid function format. Use <|tool_call_start|>[web_search(query=\"search terms\")]<|tool_call_end|> or <|tool_call_start|>[web_visit(url=\"https://url\")]<|tool_call_end|>." :
+                "Tool error: Invalid function format. Use the function and parameter format specified in the tool schema, with no extra parameters or suffix. Only web_search(query) and web_visit(url) are available." :
                 "Tool error: The response budget ended. Answer the user's question directly using the available evidence. Do not call tools.";
             if (!loina_buffer_puts(&results,message)) status=LOINA_MEMORY;
             if (unfinished || ++failures>=2) { r->tools=false;r->thinking=false; }

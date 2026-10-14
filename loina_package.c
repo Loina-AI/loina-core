@@ -19,6 +19,7 @@ const loina_package *loina_catalog_find(const char *id) {
     return NULL;
 }
 bool loina_package_valid(const loina_package *p) {
+    if (p && p->chat_template && !loina_name_valid(p->chat_template)) return false;
     if (!p || !loina_name_valid(p->id) || !p->name || !p->license || !p->runtime ||
         !p->file_count || p->file_count>LOINA_MAX_FILES || !p->runtime_abi ||
         p->feature<LOINA_TEXT || p->feature>LOINA_SPEECH) return false;

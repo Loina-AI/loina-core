@@ -31,10 +31,12 @@ static void help(void) {
          "  --threads N           CPU threads\n"
          "  --backend NAME        CPU, Vulkan, OpenCL, Metal or CUDA\n"
          "  --temp F              Temperature; zero selects greedy output\n"
+         "  --thinking on|off     Enable reasoning (default on)\n"
          "  --top-p F --min-p F    Sampling filters\n"
          "  --seed N              Sampling seed\n"
          "  --session ID          Resume a saved conversation\n"
          "  --cache-dir PATH      Packages, transcripts and KV (default .loina)\n"
+         "  --templates PATH      Override bundled Jinja templates and tools.json\n"
          "  --vision FILE         Read an image through the vision layer\n"
          "  --generate --out FILE Generate a Sana Sprint PNG (default 1024x1024, two steps)\n"
          "  --width N --height N  Image dimensions, 64-1024 in multiples of 32\n"
@@ -99,6 +101,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a,"--import")) import=v;
         else if (!strcmp(a,"--session")) session_id=v;
         else if (!strcmp(a,"--cache-dir")) config.directory=v;
+        else if (!strcmp(a,"--templates")) config.template_directory=v;
         else if (!strcmp(a,"--ctx")) { ok=integer(v,&n);if (ok) config.context=n; }
         else if (!strcmp(a,"--threads")) { ok=integer(v,&n) && n<=64 && n>0;if (ok) config.device.threads=(int)n; }
         else if (!strcmp(a,"--backend")) {
@@ -110,6 +113,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a,"-n")) ok=integer(v,&request.max_tokens);
         else if (!strcmp(a,"--seed")) ok=integer(v,&request.seed);
         else if (!strcmp(a,"--temp")) ok=real(v,&request.temperature);
+        else if (!strcmp(a,"--thinking")) { ok=!strcmp(v,"on") || !strcmp(v,"off");request.thinking=!strcmp(v,"on"); }
         else if (!strcmp(a,"--top-p")) ok=real(v,&request.top_p);
         else if (!strcmp(a,"--min-p")) ok=real(v,&request.min_p);
         else if (!strcmp(a,"--width")) { ok=integer(v,&n) && n<=1024;if (ok) request.width=(int)n; }

@@ -10,8 +10,9 @@ static bool cache_paths(loina_engine *e, loina_session *s, char *state, char *st
     loina_sha_init(&hash);
     loina_sha_update(&hash,identity,65);
     loina_sha_update(&hash,e->runtime->revision,strlen(e->runtime->revision)+1);
+    loina_sha_update(&hash,e->chat_identity,strlen(e->chat_identity)+1);
     /* Native KV and rendered prompts must match the saved token stream. */
-    int n=snprintf(config,sizeof(config),"loina-%d-chat7:ctx-%u:backend-%u:k-q8_0:v-q4_0",LOINA_ABI,e->config.context,e->selected_backend);
+    int n=snprintf(config,sizeof(config),"loina-%d-chat8:ctx-%u:backend-%u:k-q8_0:v-q4_0",LOINA_ABI,e->config.context,e->selected_backend);
     loina_sha_update(&hash,config,(size_t)n);
     loina_sha_final(&hash,key);
     if (!loina_path(dir,e->directory,"cache",key) || !loina_mkdir(dir)) return false;

@@ -1,0 +1,40 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "web_search",
+      "description": "Search current information. Returns three results with URLs and snippets.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search terms"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "web_visit",
+      "description": "Read a known HTTPS page.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "HTTPS page URL"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    }
+  }
+]

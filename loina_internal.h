@@ -24,6 +24,7 @@ typedef struct {
 struct loina_engine {
     loina_config config;
     char directory[LOINA_PATH];
+    char template_directory[LOINA_PATH], chat_identity[65];
     const loina_runtime *runtime;
     const loina_package *package;
     void *model;
@@ -78,6 +79,7 @@ bool loina_artifact_path(loina_engine *, const loina_package *, size_t, char pat
 bool loina_session_add(loina_session *, loina_role, loina_message_kind, const char *);
 void loina_session_truncate(loina_session *, size_t);
 bool loina_chat_compact(loina_session *, loina_job *);
+char *loina_template_read(loina_engine *, const char *, loina_error *);
 loina_status loina_chat(loina_job *, loina_error *);
 bool loina_cache_restore(loina_engine *, loina_session *);
 bool loina_cache_save(loina_engine *, loina_session *);

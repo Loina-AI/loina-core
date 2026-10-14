@@ -15,23 +15,24 @@ static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, lo
     (void)p;(void)error;
     if (tool_chat) {
         const loina_message *last=&s->messages[s->count-1];
-        static const char *search="<|tool_call_start|>[web_search(query=\"test\")]<|tool_call_end|>";
-        static const char *visit="<|tool_call_start|>[web_visit(url='https://example.com/?a=1&b=2')]<|tool_call_end|>";
+        static const char *search="<function name=\"web_search\"><param name=\"query\">test</param></function>";
+        static const char *visit="<function name=\"web_visit\"><param name=\"url\">https://example.com/?a=1&amp;b=2</param></function>";
         int step=tool_step++;
         *out=loina_strdup(!j->request.tools ? "Answer from the available sources." :
             tool_chat==6 ? (step==0 ? search : step==1 ? visit : "Answer using the first result despite the failed page.") :
             tool_chat==7 ? (step<2 ? search : "Answer using the second search result.") :
             tool_chat==8 ? "<think>First. Second. Third. Fourth.</think>\nAnswer." :
             tool_chat==9 ? "<think>Reasoning that reached the token limit" :
-            tool_chat==10 && step==0 ? "<think>Find current facts.</think>\n<|tool_call_start|>[web_search(query=\"test\"), web_visit(url=\"https://example.com/?a=1&b=2\")]<|tool_call_end|>Checking both sources." :
-            tool_chat==11 && step==0 ? "<|tool_call_start|>[web_search(query=__import__('os').system('id'))]<|tool_call_end|>" :
-            tool_chat==12 && step==0 ? "<|tool_call_start|>[web_search(query=\"test\"), web_search(query=\"broken\")]" :
-            tool_chat==13 && step==0 ? "<|tool_call_start|>[web_search(query='test'), unknown(query='test')]<|tool_call_end|>" :
-            tool_chat==14 && step==0 ? "<|tool_call_start|>[web_search(query='a b&c\\n\\\"quoted\\\"')]<|tool_call_end|>" :
-            tool_chat==3 && last->role!=LOINA_TOOL_RESULT ? "<|tool_call_start|>web_search(query=\"test\")" :
+            tool_chat==15 ? "The attribute is name=\"example\"." :
+            tool_chat==10 && step==0 ? "<think>Find current facts.</think>\nI will check both sources.\n<tool_call>\n<function=web_search>\n<parameter=query>\ntest\n</parameter>\n</function>\n</tool_call>\n<tool_call><function=web_visit><parameter=url>https://example.com/?a=1&b=2</parameter></function></tool_call>" :
+            tool_chat==11 && step==0 ? "<tool_call><function=web_search><parameter=wrong>test</parameter></function></tool_call>" :
+            tool_chat==12 && step==0 ? "<tool_call><function=web_search><parameter=query>test</parameter></function></tool_call><tool_call><function=web_search><parameter=query>broken</parameter>" :
+            tool_chat==13 && step==0 ? "<function name=\"web_search\"><param name=\"query\">test</param></function><function name=\"unknown\"><param name=\"query\">test</param></function>" :
+            tool_chat==14 && step==0 ? "<function name=\"web_search\"><param name=\"query\"><![CDATA[a b&c\n\"quoted\"]]></param></function>" :
+            tool_chat==3 && last->role!=LOINA_TOOL_RESULT ? "<function name=\"web_search\"><param name=\"query\">test" :
             (tool_chat==4 || tool_chat==5) ? search :
             last->role==LOINA_TOOL_RESULT ? "The page says so." : tool_chat==2 ? visit :
-            "<|tool_call_start|>[web_search(query=\"a b&c\")]<|tool_call_end|>");
+            "<tool_call><function=web_search><parameter=query>a b&c</parameter></function></tool_call>");
         if (*out) for (size_t i=0;(*out)[i];i++) loina_emit(j,LOINA_TOKEN,*out+i,1,0);
         return *out ? LOINA_OK : LOINA_MEMORY;
     }
@@ -93,9 +94,10 @@ int main(int argc, char **argv) {
     int text_packages=0;
     for (size_t i=0;i<loina_catalog_count();i++) {
         const loina_package *model=loina_catalog_get(i);
-        if (model->feature==LOINA_TEXT) { text_packages++;check(model->quality==4); }
+        if (model->feature==LOINA_TEXT) { text_packages++;check(model->chat_template); }
     }
-    check(text_packages==1);
+    check(text_packages==2);
+    check(!strcmp(loina_resolve(e,LOINA_TEXT,&error)->chat_template,"minicpm-v4.7.jinja"));
     loina_request image=loina_request_default(LOINA_IMAGE);
     check(image.width==1024 && image.height==1024 && image.steps==2);
     image.prompt="A red fox";image.output_path="fox.png";
@@ -117,14 +119,14 @@ int main(int argc, char **argv) {
     image_job=loina_job_create(e,&image,NULL,NULL,&error);check(image_job);loina_job_free(image_job);
     image.strength=1;
     image_job=loina_job_create(e,&image,NULL,NULL,&error);check(image_job);loina_job_free(image_job);
-    const loina_package *selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==4);
+    const loina_package *selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==8);
     e->config.device.backends|=LOINA_VULKAN;
-    selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==4);
+    selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==8);
     e->config.device.backends=LOINA_OPENCL;
     check(loina_resolve(e,LOINA_TEXT,&error)==selected);
     e->config.device.backends=LOINA_CPU|LOINA_VULKAN;
     e->config.device.available_ram_bytes=1000;
-    selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==4);
+    selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==8);
     e->config.device.ram_bytes=3000000000;check(!loina_resolve(e,LOINA_TEXT,&error));
     e->config.device.ram_bytes=16000000000;
     e->config.device.storage_bytes=1;check(loina_resolve(e,LOINA_TEXT,&error));
@@ -148,7 +150,7 @@ int main(int argc, char **argv) {
     /* A web round belongs to the user turn that requested it. Compaction
      * cannot leave the tool result behind without its assistant call. */
     check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"Search"));
-    check(loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"<|tool_call_start|>[web_search(query=\"test\")]<|tool_call_end|>"));
+    check(loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"<function name=\"web_search\"><param name=\"query\">test</param></function>"));
     check(loina_session_add(s,LOINA_TOOL_RESULT,LOINA_MESSAGE_TEXT,"page"));
     check(loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"Answer"));
     check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"Next question"));
@@ -156,7 +158,7 @@ int main(int argc, char **argv) {
     check(!loina_chat_compact(s,NULL));
     loina_session_truncate(s,0);s->first=0;
     loina_request request=loina_request_default(LOINA_TEXT);
-    check(request.temperature==0.2f && request.top_p==1.0f && request.min_p==0.0f && request.thinking);
+    check(request.temperature==0.7f && request.top_p==0.95f && request.min_p==0.0f && request.thinking);
     request.package=&p;request.session=s;request.prompt="hello";
     loina_job *j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_OK);check(!strcmp(loina_job_result(j),"fixture"));
@@ -173,6 +175,12 @@ int main(int argc, char **argv) {
     check(loina_set_backend(e,0,&error)==LOINA_OK && !e->model);
     check(loina_activate(e,&p,NULL,&error)==LOINA_OK);
     check(loina_cache_restore(e,s));check(restored==2);
+    /* A template edit must select a different disk cache after reloading. */
+    e->cache_session[0]=e->cache_transcript[0]=0;
+    strcpy(e->chat_identity,"custom-template");
+    check(!loina_cache_restore(e,s));
+    e->chat_identity[0]=0;
+    check(loina_cache_restore(e,s));
     int resets=reset_count;
     check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"different transcript"));check(!loina_cache_restore(e,s));
     check(reset_count==resets+1 && !e->cache_session[0]);
@@ -236,25 +244,34 @@ int main(int argc, char **argv) {
     check(j->request.tools && j->request.thinking);loina_job_free(j);tool_chat=0;
     tool_chat=10;tool_step=0;request.prompt="A model reply containing two search calls";
     before=s->count;
-    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    visible=(loina_buffer){0};
+    j=loina_job_create(e,&request,capture_event,&visible,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_OK && web_calls==13);
     check(strstr(loina_job_result(j),"The page says so") && s->count==before+4);
     check(strstr(s->messages[before+1].text,"web_visit"));
-    check(s->messages[before+2].role==LOINA_TOOL_RESULT);loina_job_free(j);
-    tool_chat=11;tool_step=0;request.prompt="Reject expressions in tool arguments";
+    check(s->messages[before+2].role==LOINA_TOOL_RESULT);
+    check(!strcmp(visible.data,loina_job_result(j)) && !strstr(visible.data,"<tool_call>"));
+    free(visible.data);loina_job_free(j);
+    tool_chat=11;tool_step=0;request.prompt="Reject unknown tool parameters";
     j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_OK && web_calls==13);
     check(strstr(s->messages[s->count-2].text,"Invalid function format"));loina_job_free(j);tool_chat=0;
     for (int mode=12;mode<=14;mode++) {
-        tool_chat=mode;tool_step=0;request.prompt="Validate the complete function list";
+        tool_chat=mode;tool_step=0;request.prompt="Validate every call before dispatch";
         j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
         check(loina_job_run(j,&error)==LOINA_OK && web_calls==(mode==14 ? 14 : 13));
         check(strstr(loina_job_result(j),"The page says so"));loina_job_free(j);
     }
+    tool_chat=15;tool_step=0;request.prompt="Explain an ordinary HTML attribute";
+    visible=(loina_buffer){0};
+    j=loina_job_create(e,&request,capture_event,&visible,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK && web_calls==14);
+    check(!strcmp(visible.data,loina_job_result(j)) && strstr(visible.data,"name=\"example\""));
+    free(visible.data);loina_job_free(j);
     tool_chat=0;
     check(loina_session_save(s,&error)==LOINA_OK);
     again=loina_session_load(e,"regression",&error);check(again && again->count==s->count);
-    check(again->messages[again->count-2].role==LOINA_TOOL_RESULT);loina_session_free(again);
+    check(again->messages[again->count-4].role==LOINA_TOOL_RESULT);loina_session_free(again);
     check(!loina_session_load(e,"../escape",&error));
     int sessions=0;check(!loina_session_list(e,count_session,&sessions,&error));check(sessions>=1);
     check(loina_path(path,argv[1],"outputs","sample.png"));
