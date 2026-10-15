@@ -255,7 +255,9 @@ int main(int argc, char **argv) {
     char *new_cold=run(e,independent,"Reply with OK.",false);
     check(says(new_chat,"OK") && says(new_cold,"OK"));free(new_chat);free(new_cold);
     size_t original=s->count;
-    run(e,s,"Count to ten.",true);check(s->count==original && !e->model);
+    void *resident=e->model;
+    run(e,s,"Count to ten.",true);
+    check(s->count==original && e->model==resident && ((llama_state *)e->model)->count==0);
     resumed=run(e,s,"Reply with RECOVERED.",false);
     loina_session *cancel_reference=copy_session(e,s,"cancel-reference");
     loina_session_truncate(cancel_reference,original);

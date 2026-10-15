@@ -201,10 +201,15 @@ int main(int argc, char **argv) {
     loina_session *fresh=loina_session_create(e,"fresh",&error);check(fresh);
     check(!loina_cache_restore(e,fresh));check(reset_count==resets+2);
     loina_session_free(fresh);
+    check(loina_cache_restore(e,s));
+    void *resident=e->model;
+    int loads=loaded;resets=reset_count;
     j=loina_job_create(e,&request,cancel_event,&j,&error);check(j);
-    check(loina_job_run(j,&error)==LOINA_CANCELLED);check(s->count==2);check(!e->model);loina_job_free(j);
+    check(loina_job_run(j,&error)==LOINA_CANCELLED);check(s->count==2);
+    check(e->model==resident && loaded==loads && reset_count==resets+1 && !e->cache_session[0]);
+    loina_job_free(j);
     j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
-    check(loina_job_run(j,&error)==LOINA_OK);check(s->count==4);loina_job_free(j);
+    check(loina_job_run(j,&error)==LOINA_OK);check(s->count==4 && e->model==resident && loaded==loads);loina_job_free(j);
     loina_session_truncate(s,2);
     request.temperature=NAN;check(!loina_job_create(e,&request,NULL,NULL,&error));request.temperature=0.7f;
     char *text=NULL;

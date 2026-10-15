@@ -205,7 +205,11 @@ loina_status loina_job_run(loina_job *j, loina_error *error) {
     else status=loina_fail(error,LOINA_UNSUPPORTED,"Runtime lacks the requested operation");
 done:
     if (loina_job_cancelled(j) && !status) status=loina_fail(error,LOINA_CANCELLED,"Job cancelled");
-    if (status==LOINA_CANCELLED || status==LOINA_RUNTIME_ERROR) loina_unload(e);
+    /* Chat rolls back the transcript and resets inference state on cancellation.
+     * Keep its weights and GPU kernels resident for the next request. */
+    bool chat=j->request.feature==LOINA_TEXT || j->request.feature==LOINA_VISION;
+    if (status==LOINA_RUNTIME_ERROR || (status==LOINA_CANCELLED &&
+        (!chat || !e->runtime || !e->runtime->reset))) loina_unload(e);
     if (!status) loina_emit(j,LOINA_FINISHED,loina_job_result(j),strlen(loina_job_result(j)),100);
     atomic_store(&e->busy,false);
     return status;
