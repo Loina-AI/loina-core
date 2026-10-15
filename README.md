@@ -71,9 +71,9 @@ The current catalog contains:
 
 | Use | Model package |
 | --- | --- |
-| Default chat | MiniCPM-V-4.7-1B, Q8_0 |
-| Optional core chat | Bartowski MiniCPM5-2B, Q4_K_M |
-| Vision | MiniCPM-V-4.7-1B with the FP16 projector and 16x token compression |
+| Default chat | LFM2.5-VL-3B, Q4_K_M |
+| Optional core chat | MiniCPM-V-4.7-1B Q8_0 and Bartowski MiniCPM5-2B Q4_K_M |
+| Vision | LFM2.5-VL-3B with mmproj-BF16.gguf |
 | Speech recognition | Parakeet TDT 0.6B v3, Q4_K |
 | Image generation | Sana Sprint 0.6B, protected Q8_0, with Gemma 2 Q4_K_M and full FP16 DC-AE |
 
@@ -82,25 +82,33 @@ pinned revision, filenames, hashes, sizes, license, and runtime ABI. See
 [loina_catalog.c](loina_catalog.c) for the exact artifacts. Regenerate the
 catalog with `node tools/catalog.cjs` (requires Hugging Face API access).
 
-MiniCPM-V uses temperature 0.7, top-k 100, top-p 0.95, min-p 0 and repetition
-penalty 1.03, following the [official model card](https://huggingface.co/openbmb/MiniCPM-V-4.7-1B).
-Thinking remains a general request option, with streaming reasoning and recovery
-when reasoning reaches the token limit. MiniCPM5 retains its XML function format
-and top-k 40; use `--temp 1.0` for its original sampling temperature. Android uses MiniCPM-V by default and has no model selector.
+LFM2.5-VL uses temperature 0.2, top-k 50, top-p 1, min-p 0 and repetition
+penalty 1, following the [official model card](https://huggingface.co/LiquidAI/LFM2.5-VL-3B).
+It answers directly and has thinking disabled. Thinking remains a general request
+option: packages declare the capability, and supported models retain streaming
+reasoning and recovery when reasoning reaches the token limit. MiniCPM-V and
+MiniCPM5 remain optional core packages. Android selects LFM and has no model selector.
+For MiniCPM-V use `--temp 0.7 --top-p 0.95`; MiniCPM5 retains top-k 40 and
+supports `--temp 1.0 --top-p 0.95`.
 
 Chat prompts live in [templates](templates/README.md). The model's `.jinja` file
 receives `messages`, OpenAI function definitions in `tools`, `enable_thinking`,
 `add_generation_prompt`, `bos_token`, and `eos_token`. Edit `system.jinja` for
 assistant instructions and `tools.json` for tool descriptions and schemas.
-The catalog's `template` field selects the model template. Files are bundled at
+The catalog's `template` field selects the optional model template. `system.jinja`
+is shared by all text and vision models. Without a custom Jinja file, the runtime
+uses llama.cpp's GGUF template (`tool_use` for tools, otherwise the default),
+then llama.cpp's ChatML fallback if the model supplies neither. Files are bundled at
 build time; `--templates PATH` or `loina_config.template_directory` overrides
 individual files without rebuilding. Restart the engine to load edited files.
-The core dispatches the supported MiniCPM XML formats only; adding a different
-output format also requires a parser. Defining a new tool does not register an
+The core dispatches MiniCPM XML calls and LFM Python-style calls. It parses the
+call syntax without executing Python; unknown functions, extra parameters and
+incomplete batches are rejected before any tool runs. Adding another output
+format also requires a parser. Defining a new tool does not register an
 implementation.
 
 The chat package contains only the language weights. The vision package
-reuses those installed weights and downloads `mmproj-model-f16.gguf` when the host
+reuses those installed weights and downloads `mmproj-BF16.gguf` when the host
 requests vision. The download size excludes artifacts already installed in
 another package; the reused bytes are hashed again before installation.
 Parakeet uses the [cstr GGUF conversion](https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF).
@@ -140,7 +148,7 @@ Start by inspecting the catalog and device capabilities:
 With the catalog's chat GGUF on disk, ask a question:
 
 ```sh
-./build/loina -m /path/to/MiniCPM-V-4_7-1B-Q8_0.gguf -p "Explain radix trees."
+./build/loina -m /path/to/LFM2.5-VL-3B-Q4_K_M.gguf -p "Explain radix trees."
 ```
 
 Use `--backend CPU` or `--backend Vulkan` to test a particular available

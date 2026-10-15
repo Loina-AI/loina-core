@@ -132,8 +132,8 @@ loina_status loina_preload(loina_engine *e, loina_feature feature, loina_job *jo
     return status;
 }
 loina_request loina_request_default(loina_feature feature) {
-    return (loina_request){.feature=feature,.max_tokens=512,.temperature=0.7f,
-        .top_p=0.95f,.min_p=0.0f,.seed=UINT32_MAX,.width=1024,.height=1024,.steps=2,.thinking=true,.strength=0.75f};
+    return (loina_request){.feature=feature,.max_tokens=512,.temperature=0.2f,
+        .top_p=1.0f,.min_p=0.0f,.seed=UINT32_MAX,.width=1024,.height=1024,.steps=2,.thinking=true,.strength=0.75f};
 }
 loina_job *loina_job_create(loina_engine *e, const loina_request *r, loina_event_fn event, void *user, loina_error *error) {
     if (!e || !r || r->feature<LOINA_TEXT || r->feature>LOINA_SPEECH ||

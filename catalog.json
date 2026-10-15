@@ -1,11 +1,60 @@
 [
   {
+    "repo": "unsloth/LFM2.5-VL-3B-GGUF",
+    "revision": "22f063714556bd4daa81c40dc1ff15ca37ae92ea",
+    "name": "LFM 2.5 VL 3B · Chat",
+    "feature": "LOINA_TEXT",
+    "runtime": "llama",
+    "template": "lfm2.5-vl-3b.jinja",
+    "thinking": false,
+    "quality": 12,
+    "memory": 3000000000,
+    "license": "LFM Open License v1.0",
+    "files": [
+      {
+        "name": "LFM2.5-VL-3B-Q4_K_M.gguf",
+        "sha256": "da7a4e5dd13128fb8f149d6f81114e8d112ce7abf05384b4541bad1dcc058f4e",
+        "bytes": 1674455424,
+        "url": "https://huggingface.co/unsloth/LFM2.5-VL-3B-GGUF/resolve/22f063714556bd4daa81c40dc1ff15ca37ae92ea/LFM2.5-VL-3B-Q4_K_M.gguf"
+      }
+    ],
+    "id": "lfm2-5-vl-3b-q4_k_m-c815851c1e0a1361"
+  },
+  {
+    "repo": "unsloth/LFM2.5-VL-3B-GGUF",
+    "revision": "22f063714556bd4daa81c40dc1ff15ca37ae92ea",
+    "name": "LFM 2.5 VL 3B · Vision",
+    "feature": "LOINA_VISION",
+    "runtime": "llama",
+    "template": "lfm2.5-vl-3b.jinja",
+    "thinking": false,
+    "quality": 12,
+    "memory": 4000000000,
+    "license": "LFM Open License v1.0",
+    "files": [
+      {
+        "name": "LFM2.5-VL-3B-Q4_K_M.gguf",
+        "sha256": "da7a4e5dd13128fb8f149d6f81114e8d112ce7abf05384b4541bad1dcc058f4e",
+        "bytes": 1674455424,
+        "url": "https://huggingface.co/unsloth/LFM2.5-VL-3B-GGUF/resolve/22f063714556bd4daa81c40dc1ff15ca37ae92ea/LFM2.5-VL-3B-Q4_K_M.gguf"
+      },
+      {
+        "name": "mmproj-BF16.gguf",
+        "sha256": "b6657dab6461aa36d71a716649e2a443ecd68349b650b16477dd56b380e99249",
+        "bytes": 855763552,
+        "url": "https://huggingface.co/unsloth/LFM2.5-VL-3B-GGUF/resolve/22f063714556bd4daa81c40dc1ff15ca37ae92ea/mmproj-BF16.gguf"
+      }
+    ],
+    "id": "lfm2-5-vl-3b-q4_k_m-8f72ca4c841abd9c"
+  },
+  {
     "repo": "openbmb/MiniCPM-V-4.7-1B-gguf",
     "revision": "8fe0ddd11c0e6be4aa536e5ddedcab5de9b3d79e",
     "name": "MiniCPM-V 4.7 1B · Chat",
     "feature": "LOINA_TEXT",
     "runtime": "llama",
-    "template": "minicpm-v4.7.jinja",
+    "template": "minicpm-v4.7-1b.jinja",
+    "thinking": true,
     "quality": 8,
     "memory": 2000000000,
     "license": "Apache-2.0",
@@ -25,7 +74,8 @@
     "name": "MiniCPM-V 4.7 1B · Vision 16x",
     "feature": "LOINA_VISION",
     "runtime": "llama",
-    "template": "minicpm-v4.7.jinja",
+    "template": "minicpm-v4.7-1b.jinja",
+    "thinking": true,
     "quality": 8,
     "memory": 3500000000,
     "license": "Apache-2.0",
@@ -51,7 +101,8 @@
     "name": "MiniCPM5 2B · Chat",
     "feature": "LOINA_TEXT",
     "runtime": "llama",
-    "template": "minicpm5.jinja",
+    "template": "minicpm5-2b.jinja",
+    "thinking": true,
     "quality": 4,
     "memory": 2800000000,
     "license": "Apache-2.0",

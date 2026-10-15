@@ -24,7 +24,7 @@
         {{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' }}
     {%- endif %}
 {%- endif %}
-{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}
+{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1, user_query='') %}
 {%- for message in messages[::-1] %}
     {%- set index = (messages|length - 1) - loop.index0 %}
     {%- if ns.multi_step_tool and message.role == "user" and message.content is string and not(message.content.startswith('<tool_response>') and message.content.endswith('</tool_response>')) %}
@@ -39,6 +39,9 @@
         {%- set content = '' %}
     {%- endif %}
     {%- if (message.role == "user") or (message.role == "system" and not loop.first) %}
+        {%- if message.role == "user" and not(content.startswith('<tool_response>') and content.endswith('</tool_response>')) %}
+            {%- set ns.user_query = content %}
+        {%- endif %}
         {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>' + '\n' }}
     {%- elif message.role == "assistant" %}
         {%- set reasoning_content = '' %}
@@ -96,10 +99,9 @@
         {%- endif %}
         {{- '\n</tool_response>' }}
         {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}
-            {%- if loop.last %}
-                {{- '\n\nUse the tool evidence to answer this original user question. Use the response language requested by the user, otherwise the language of this question:\n' + messages[ns.last_query_index].content }}
-            {%- endif %}
             {{- '<|im_end|>\n' }}
+            {#- Tool evidence uses a user turn; give the real question its own turn. -#}
+            {{- '<|im_start|>user\n' + ns.user_query + '<|im_end|>\n' }}
         {%- endif %}
     {%- endif %}
 {%- endfor %}

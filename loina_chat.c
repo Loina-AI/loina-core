@@ -40,10 +40,15 @@ static bool take(const char **s, const char *text) {
     return true;
 }
 typedef struct { bool search; char *argument; } tool_call;
-static const char *tool_prefixes[]={"<function","<web_search>","<web_visit>","<tool_call>","name=\"",NULL};
+static const char *tool_prefixes[]={"<function","<web_search>","<web_visit>","<tool_call>","<|tool_call_start|>","name=\"",NULL};
 static const char *tool_start(const char *reply) {
-    const char *function=strstr(reply,"<function"),*call=strstr(reply,"<tool_call>");
-    return function && (!call || function<call) ? function : call;
+    const char *first=NULL;
+    const char *markers[]={"<function","<tool_call>","<|tool_call_start|>"};
+    for (size_t i=0;i<sizeof(markers)/sizeof(*markers);i++) {
+        const char *call=strstr(reply,markers[i]);
+        if (call && (!first || call<first)) first=call;
+    }
+    return first;
 }
 static bool tool_like(const char *reply) {
     reply=reply ? chat_answer(reply) : NULL;
@@ -95,10 +100,52 @@ static bool tool_request(const char **reply, tool_call *call) {
     call->argument=b.data;
     return true;
 }
+static char *tool_string(const char **s) {
+    const char *p=skip_space(*s);
+    char quote=*p++;
+    if (quote!='\"' && quote!='\'') return NULL;
+    loina_buffer b={0};
+    while (*p && *p!=quote) {
+        char c=*p++;
+        if (c=='\\') {
+            c=*p++;
+            if (c=='n') c='\n';
+            else if (c=='r') c='\r';
+            else if (c=='t') c='\t';
+            else if (c!='\\' && c!='\"' && c!='\'') goto fail;
+        } else if ((unsigned char)c<32) goto fail;
+        if (b.length>=8192 || !loina_buffer_add(&b,&c,1)) goto fail;
+    }
+    if (*p!=quote || !b.length) goto fail;
+    *s=p+1;return b.data;
+fail:
+    free(b.data);return NULL;
+}
+static int python_requests(const char *reply, tool_call calls[4]) {
+    int count=0;
+    if (!take(&reply,"<|tool_call_start|>") || !take(&reply,"[")) return 0;
+    do {
+        if (count==4) goto fail;
+        bool search=take(&reply,"web_search");
+        if (!search && !take(&reply,"web_visit")) goto fail;
+        if (!take(&reply,"(") || !take(&reply,search ? "query" : "url") || !take(&reply,"=")) goto fail;
+        char *argument=tool_string(&reply);
+        if (!argument) goto fail;
+        calls[count++]=(tool_call){search,argument};
+        if (!take(&reply,")")) goto fail;
+    } while (take(&reply,","));
+    if (!take(&reply,"]") || !take(&reply,"<|tool_call_end|>")) goto fail;
+    if (strstr(reply,"<|tool_call_start|>")) goto fail;
+    return count;
+fail:
+    for (int i=0;i<count;i++) { free(calls[i].argument);calls[i].argument=NULL; }
+    return 0;
+}
 static int tool_requests(const char *reply, tool_call calls[4]) {
     int count=0;
     reply=chat_answer(reply);
     if (!reply || !(reply=tool_start(reply))) return 0;
+    if (!strncmp(reply,"<|tool_call_start|>",19)) return python_requests(reply,calls);
     do {
         if (count==4 || !tool_request(&reply,&calls[count])) goto fail;
         count++;
@@ -159,7 +206,7 @@ static void chat_event(void *user, loina_event event, const char *text, size_t n
         while (isspace((unsigned char)*answer)) answer++;
     }
     if (!*answer) return;
-    const char *prefixes[]={"<think>","<function","<web_search>","<web_visit>","<tool_call>","name=\"",NULL};
+    const char *prefixes[]={"<think>","<function","<web_search>","<web_visit>","<tool_call>","<|tool_call_start|>","name=\"",NULL};
     for (int i=0;prefixes[i];i++) {
         size_t have=strlen(answer),prefix=strlen(prefixes[i]);
         if (have<prefix && !strncmp(answer,prefixes[i],have)) return;
@@ -210,6 +257,7 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
     }
     status=loina_activate(e,p,job,error);
     if (status) goto done;
+    r->thinking=thinking && p->thinking;
     if (!e->runtime->chat) { status=loina_fail(error,LOINA_UNSUPPORTED,"Runtime does not implement chat");goto done; }
     if (!s->package_id[0]) strcpy(s->package_id,p->id);
     if (!temporary) loina_cache_restore(e,s);
@@ -249,7 +297,7 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
         loina_emit(job,LOINA_TOOL,"",0,0);
         if (!count) {
             const char *message=malformed ?
-                "Tool error: Invalid function format. Use the function and parameter format specified in the tool schema, with no extra parameters or suffix. Only web_search(query) and web_visit(url) are available." :
+                "Tool error: Invalid function format. Use the call format specified by the model template, with no extra parameters. Only web_search(query) and web_visit(url) are available." :
                 "Tool error: The response budget ended. Answer the user's question directly using the available evidence. Do not call tools.";
             if (!loina_buffer_puts(&results,message)) status=LOINA_MEMORY;
             if (unfinished || ++failures>=2) { r->tools=false;r->thinking=false; }

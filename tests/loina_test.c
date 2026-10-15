@@ -6,6 +6,7 @@
 #define check(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while (0)
 static int loaded,unloaded,restored,reset_count,web_calls,tool_chat,tool_step;
 static bool thinking_live;
+static bool thinking_requested;
 static unsigned backends(void) { return LOINA_CPU|LOINA_VULKAN|LOINA_OPENCL; }
 static void *load(loina_engine *e, const loina_package *p, loina_job *j, loina_error *error) {
     (void)e;(void)p;(void)j;(void)error;loaded++;return malloc(1);
@@ -13,6 +14,7 @@ static void *load(loina_engine *e, const loina_package *p, loina_job *j, loina_e
 static void unload(void *p) { unloaded++;free(p); }
 static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, loina_error *error) {
     (void)p;(void)error;
+    thinking_requested=j->request.thinking;
     if (tool_chat) {
         const loina_message *last=&s->messages[s->count-1];
         static const char *search="<function name=\"web_search\"><param name=\"query\">test</param></function>";
@@ -24,6 +26,16 @@ static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, lo
             tool_chat==8 ? "<think>First. Second. Third. Fourth.</think>\nAnswer." :
             tool_chat==9 ? "<think>Reasoning that reached the token limit" :
             tool_chat==15 ? "The attribute is name=\"example\"." :
+            tool_chat==16 && step==0 ? "<|tool_call_start|>[web_search(query='test')]<|tool_call_end|>Searching." :
+            tool_chat==17 && step==0 ? "Checking sources.\n<|tool_call_start|>[web_search(query='test'), web_visit(url='https://example.com/?a=1&b=2')]<|tool_call_end|>" :
+            tool_chat==18 && step==0 ? "<|tool_call_start|>[web_search(query='test'), unknown(query='test')]<|tool_call_end|>" :
+            tool_chat==19 && step==0 ? "<|tool_call_start|>[web_search(query='test', extra='no')]<|tool_call_end|>" :
+            tool_chat==20 && step==0 ? "<|tool_call_start|>[web_search(query='test'), web_visit(url='https://example.com'" :
+            tool_chat==21 && step==0 ? "<|tool_call_start|>[web_search(query='a b&c\\n\"quoted\"')]<|tool_call_end|>" :
+            tool_chat==22 && step==0 ? "<|tool_call_start|>[web_search(query='test'), web_search(query='test'), web_search(query='test'), web_search(query='test'), web_search(query='test')]<|tool_call_end|>" :
+            tool_chat==23 && step==0 ? "<|tool_call_start|>[web_search(query='')]<|tool_call_end|>" :
+            tool_chat==24 && step==0 ? "<|tool_call_start|>[web_search(query=__import__('os'))]<|tool_call_end|>" :
+            tool_chat==25 && step==0 ? "<|tool_call_start|>[web_search(query='test')]<|tool_call_end|><|tool_call_start|>[unknown()]<|tool_call_end|>" :
             tool_chat==10 && step==0 ? "<think>Find current facts.</think>\nI will check both sources.\n<tool_call>\n<function=web_search>\n<parameter=query>\ntest\n</parameter>\n</function>\n</tool_call>\n<tool_call><function=web_visit><parameter=url>https://example.com/?a=1&b=2</parameter></function></tool_call>" :
             tool_chat==11 && step==0 ? "<tool_call><function=web_search><parameter=wrong>test</parameter></function></tool_call>" :
             tool_chat==12 && step==0 ? "<tool_call><function=web_search><parameter=query>test</parameter></function></tool_call><tool_call><function=web_search><parameter=query>broken</parameter>" :
@@ -63,8 +75,8 @@ static void count_session(void *user, const char *id) { check(loina_name_valid(i
 static loina_status web(void *user, const char *url, char **text, loina_job *job, loina_error *error) {
     (void)user;(void)job;(void)error;
     bool visit=strstr(url,"https://example.com/?a=1&b=2")!=NULL;
-    check(((tool_chat==2 || tool_chat==6 || tool_chat==10) && visit) ||
-        strstr(url,tool_chat==14 ? "html.duckduckgo.com/html/?q=a%20b%26c%0A%22quoted%22" : tool_chat>=4 ? "html.duckduckgo.com/html/?q=test" : "html.duckduckgo.com/html/?q=a%20b%26c"));
+    check(((tool_chat==2 || tool_chat==6 || tool_chat==10 || tool_chat==17) && visit) ||
+        strstr(url,tool_chat==14 || tool_chat==21 ? "html.duckduckgo.com/html/?q=a%20b%26c%0A%22quoted%22" : tool_chat>=4 ? "html.duckduckgo.com/html/?q=test" : "html.duckduckgo.com/html/?q=a%20b%26c"));
     web_calls++;
     *text=loina_strdup(tool_chat==4 || (tool_chat==6 && visit) ? "Tool error: Web page timed out" : "page");return LOINA_OK;
 }
@@ -96,8 +108,9 @@ int main(int argc, char **argv) {
         const loina_package *model=loina_catalog_get(i);
         if (model->feature==LOINA_TEXT) { text_packages++;check(model->chat_template); }
     }
-    check(text_packages==2);
-    check(!strcmp(loina_resolve(e,LOINA_TEXT,&error)->chat_template,"minicpm-v4.7.jinja"));
+    check(text_packages==3);
+    check(!strcmp(loina_resolve(e,LOINA_TEXT,&error)->chat_template,"lfm2.5-vl-3b.jinja"));
+    check(!loina_resolve(e,LOINA_TEXT,&error)->thinking);
     loina_request image=loina_request_default(LOINA_IMAGE);
     check(image.width==1024 && image.height==1024 && image.steps==2);
     image.prompt="A red fox";image.output_path="fox.png";
@@ -119,21 +132,21 @@ int main(int argc, char **argv) {
     image_job=loina_job_create(e,&image,NULL,NULL,&error);check(image_job);loina_job_free(image_job);
     image.strength=1;
     image_job=loina_job_create(e,&image,NULL,NULL,&error);check(image_job);loina_job_free(image_job);
-    const loina_package *selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==8);
+    const loina_package *selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==12);
     e->config.device.backends|=LOINA_VULKAN;
-    selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==8);
+    selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==12);
     e->config.device.backends=LOINA_OPENCL;
     check(loina_resolve(e,LOINA_TEXT,&error)==selected);
     e->config.device.backends=LOINA_CPU|LOINA_VULKAN;
     e->config.device.available_ram_bytes=1000;
-    selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==8);
+    selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==12);
     e->config.device.ram_bytes=3000000000;check(!loina_resolve(e,LOINA_TEXT,&error));
     e->config.device.ram_bytes=16000000000;
     e->config.device.storage_bytes=1;check(loina_resolve(e,LOINA_TEXT,&error));
     e->config.device.storage_bytes=20000000000;
     e->config.device.available_ram_bytes=10000000000;
     loina_package p={.id="test-model",.name="Test",.license="MIT",.runtime="llama",.runtime_abi=1,
-        .feature=LOINA_TEXT,.quality=4,.backends=LOINA_CPU,.memory_bytes=100,.file_count=1,
+        .feature=LOINA_TEXT,.thinking=true,.quality=4,.backends=LOINA_CPU,.memory_bytes=100,.file_count=1,
         .files={{.name="model.gguf",.sha256="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",.bytes=3}}};
     char import[LOINA_PATH],path[LOINA_PATH];
     check(loina_path(import,argv[1],"import",NULL));check(loina_mkdir(import));check(loina_path(path,import,"model.gguf",NULL));
@@ -158,7 +171,7 @@ int main(int argc, char **argv) {
     check(!loina_chat_compact(s,NULL));
     loina_session_truncate(s,0);s->first=0;
     loina_request request=loina_request_default(LOINA_TEXT);
-    check(request.temperature==0.7f && request.top_p==0.95f && request.min_p==0.0f && request.thinking);
+    check(request.temperature==0.2f && request.top_p==1.0f && request.min_p==0.0f && request.thinking);
     request.package=&p;request.session=s;request.prompt="hello";
     loina_job *j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_OK);check(!strcmp(loina_job_result(j),"fixture"));
@@ -269,6 +282,20 @@ int main(int argc, char **argv) {
     check(!strcmp(visible.data,loina_job_result(j)) && strstr(visible.data,"name=\"example\""));
     free(visible.data);loina_job_free(j);
     tool_chat=0;
+    for (int mode=16;mode<=25;mode++) {
+        tool_chat=mode;tool_step=0;request.prompt="Parse native Python-style tool calls";
+        int calls=web_calls,expected=mode==17 ? 2 : mode==16 || mode==21 ? 1 : 0;
+        visible=(loina_buffer){0};
+        j=loina_job_create(e,&request,capture_event,&visible,&error);check(j);
+        check(loina_job_run(j,&error)==LOINA_OK && web_calls==calls+expected);
+        check(strstr(loina_job_result(j),"The page says so"));
+        check(!strstr(visible.data,"<|tool_call_start|>"));
+        free(visible.data);loina_job_free(j);
+    }
+    tool_chat=0;p.thinking=false;
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK && !thinking_requested && j->request.thinking);
+    loina_job_free(j);p.thinking=true;
     check(loina_session_save(s,&error)==LOINA_OK);
     again=loina_session_load(e,"regression",&error);check(again && again->count==s->count);
     check(again->messages[again->count-4].role==LOINA_TOOL_RESULT);loina_session_free(again);

@@ -21,9 +21,9 @@ typedef struct {
     uint32_t context_size;
     unsigned backend;
     loina_job *job;
-    llama_jinja *chat_template, *system_template;
+    llama_jinja *chat_template, *tool_template, *system_template;
     char *tools;
-    bool thinking_prefix, minicpm5;
+    bool thinking_prefix, minicpm5, lfm2;
 } llama_state;
 
 static ggml_backend_dev_t gpu_device(unsigned bits, uint64_t minimum) {
@@ -74,7 +74,7 @@ static void llama_unload(void *pointer) {
     if (s->vision) mtmd_free(s->vision);
     if (s->context) llama_free(s->context);
     if (s->model) llama_model_free(s->model);
-    llama_jinja_free(s->chat_template);llama_jinja_free(s->system_template);
+    llama_jinja_free(s->chat_template);llama_jinja_free(s->tool_template);llama_jinja_free(s->system_template);
     free(s->tools);free(s->tokens);free(s);
 }
 static void *llama_load(loina_engine *e, const loina_package *p, loina_job *job, loina_error *error) {
@@ -113,27 +113,35 @@ static void *llama_load(loina_engine *e, const loina_package *p, loina_job *job,
         mp.progress_callback=load_progress;mp.progress_callback_user_data=job;
         s->model=llama_model_load_from_file(path,mp);
         if (!s->model) goto retry;
-        char *chat=p->chat_template ? loina_template_read(e,p->chat_template,error) :
-            loina_strdup(llama_model_chat_template(s->model,NULL));
+        const char *embedded=llama_model_chat_template(s->model,NULL);
+        const char *embedded_tools=llama_model_chat_template(s->model,"tool_use");
+        if (!embedded || !strcmp(embedded,"chatml")) embedded=embedded_tools ? embedded_tools : llama_jinja_default_template();
+        char *chat=loina_template_model(e,p->chat_template,embedded,error);
+        char *tool=loina_template_model(e,p->chat_template,embedded_tools ? embedded_tools : embedded,error);
         char *system=loina_template_read(e,"system.jinja",error);
         s->tools=loina_template_read(e,"tools.json",error);
         char message[512]="";
-        if (chat && system && s->tools) {
+        if (chat && tool && system && s->tools) {
             s->chat_template=llama_jinja_create(chat,message,sizeof(message));
-            if (s->chat_template) s->system_template=llama_jinja_create(system,message,sizeof(message));
+            if (s->chat_template && strcmp(chat,tool)) s->tool_template=llama_jinja_create(tool,message,sizeof(message));
+            if (s->chat_template && (!strcmp(chat,tool) || s->tool_template)) s->system_template=llama_jinja_create(system,message,sizeof(message));
         }
-        if (!s->chat_template || !s->system_template) {
-            free(chat);free(system);llama_unload(s);
+        if (!s->chat_template || !s->system_template || (chat && tool && strcmp(chat,tool) && !s->tool_template)) {
+            free(chat);free(tool);free(system);llama_unload(s);
             if (*message) loina_fail(error,LOINA_UNSUPPORTED,"Invalid Jinja template: %s",message);
             return NULL;
         }
         loina_sha identity;loina_sha_init(&identity);
         loina_sha_update(&identity,chat,strlen(chat)+1);
+        loina_sha_update(&identity,tool,strlen(tool)+1);
         loina_sha_update(&identity,system,strlen(system)+1);
         loina_sha_update(&identity,s->tools,strlen(s->tools)+1);
         loina_sha_final(&identity,e->chat_identity);
-        free(chat);free(system);
-        s->minicpm5=p->chat_template && !strcmp(p->chat_template,"minicpm5.jinja");
+        free(chat);free(tool);free(system);
+        s->minicpm5=p->chat_template && !strcmp(p->chat_template,"minicpm5-2b.jinja");
+        char architecture[64]="";
+        llama_model_meta_val_str(s->model,"general.architecture",architecture,sizeof(architecture));
+        s->lfm2=!strncmp(architecture,"lfm2",4);
         struct llama_context_params cp=llama_context_default_params();
         cp.n_ctx=e->config.context;
         int32_t trained=llama_model_n_ctx_train(s->model);
@@ -156,7 +164,7 @@ static void *llama_load(loina_engine *e, const loina_package *p, loina_job *job,
         if (p->feature==LOINA_VISION) {
             if (!loina_artifact_path(e,p,1,path)) goto retry;
             struct mtmd_context_params vp=mtmd_context_params_default();
-            vp.use_gpu=accelerated;vp.n_threads=e->config.device.threads;vp.warmup=false;
+            vp.use_gpu=accelerated;vp.device=gpu;vp.n_threads=e->config.device.threads;vp.warmup=false;
             vp.flash_attn_type=LLAMA_FLASH_ATTN_TYPE_ENABLED;
             vp.progress_callback=load_progress;vp.progress_callback_user_data=job;
             s->vision=mtmd_init_from_file(path,s->model,vp);
@@ -217,7 +225,8 @@ static char *render(llama_state *state, loina_session *session, loina_job *job, 
     }
     ok=ok && loina_buffer_puts(&b,"]}");
     if (!ok) { free(b.data);loina_fail(error,LOINA_MEMORY,"Cannot retain template context");return NULL; }
-    char *prompt=llama_jinja_render(state->chat_template,b.data,message,sizeof(message));
+    llama_jinja *tmpl=job->request.tools && state->tool_template ? state->tool_template : state->chat_template;
+    char *prompt=llama_jinja_render(tmpl,b.data,message,sizeof(message));
     free(b.data);
     if (!prompt) { loina_fail(error,LOINA_UNSUPPORTED,"Cannot render chat template: %s",message);return NULL; }
     size_t n=strlen(prompt);
@@ -269,7 +278,8 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
     for (;;) {
         free(prompt);prompt=render(s,session,job,error);
         if (!prompt) { status=error ? error->code : LOINA_RUNTIME_ERROR;goto done; }
-        count=-llama_tokenize(vocab,prompt,(int32_t)strlen(prompt),NULL,0,true,true);
+        /* Jinja already emits the model's special tokens, including BOS. */
+        count=-llama_tokenize(vocab,prompt,(int32_t)strlen(prompt),NULL,0,false,true);
         if (count<=0) { status=loina_fail(error,LOINA_RUNTIME_ERROR,"Cannot tokenize prompt");goto done; }
         if ((uint32_t)count+job->request.max_tokens+8<s->context_size || s->vision) break;
         if (!loina_chat_compact(session,job)) { status=loina_fail(error,LOINA_INVALID,"Message is too large for the model context");goto done; }
@@ -278,7 +288,7 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
         llama_memory_clear(llama_get_memory(s->context),true);s->count=0;
         struct mtmd_helper_bitmap_wrapper image=mtmd_helper_bitmap_init_from_file(s->vision,job->input,false,mtmd_helper_init_opt_default());
         mtmd_input_chunks *chunks=mtmd_input_chunks_init();
-        mtmd_input_text input={prompt,strlen(prompt),true,true};
+        mtmd_input_text input={prompt,strlen(prompt),false,true};
         const mtmd_bitmap *images[]={image.bitmap};
         if (!image.bitmap || !chunks || mtmd_tokenize(s->vision,chunks,&input,images,1)) {
             if (image.bitmap) mtmd_bitmap_free(image.bitmap);
@@ -295,7 +305,7 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
     } else {
         tokens=malloc((size_t)count*sizeof(*tokens));
         if (!tokens) { status=loina_fail(error,LOINA_MEMORY,"Cannot allocate prompt tokens");goto done; }
-        if (llama_tokenize(vocab,prompt,(int32_t)strlen(prompt),tokens,count,true,true)!=count) { status=loina_fail(error,LOINA_RUNTIME_ERROR,"Tokenizer count changed");goto done; }
+        if (llama_tokenize(vocab,prompt,(int32_t)strlen(prompt),tokens,count,false,true)!=count) { status=loina_fail(error,LOINA_RUNTIME_ERROR,"Tokenizer count changed");goto done; }
         size_t common=0;
         while (common<s->count && common<(size_t)count && s->tokens[common]==tokens[common]) common++;
         if (common==(size_t)count && common) common--; /* Recompute the last logits. */
@@ -320,8 +330,8 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
     if (!sampler) { status=loina_fail(error,LOINA_MEMORY,"Cannot allocate sampler");goto done; }
     if (job->request.temperature==0) llama_sampler_chain_add(sampler,llama_sampler_init_greedy());
     else {
-        if (!s->minicpm5) llama_sampler_chain_add(sampler,llama_sampler_init_penalties(llama_vocab_n_tokens(vocab),(int32_t)s->context_size,1.03f,0.0f,0.0f));
-        llama_sampler_chain_add(sampler,llama_sampler_init_top_k(s->minicpm5 ? 40 : 100));
+        if (!s->minicpm5 && !s->lfm2) llama_sampler_chain_add(sampler,llama_sampler_init_penalties(llama_vocab_n_tokens(vocab),(int32_t)s->context_size,1.03f,0.0f,0.0f));
+        llama_sampler_chain_add(sampler,llama_sampler_init_top_k(s->lfm2 ? 50 : s->minicpm5 ? 40 : 100));
         llama_sampler_chain_add(sampler,llama_sampler_init_top_p(job->request.top_p,1));
         if (job->request.min_p>0) llama_sampler_chain_add(sampler,llama_sampler_init_min_p(job->request.min_p,1));
         llama_sampler_chain_add(sampler,llama_sampler_init_temp(job->request.temperature));
