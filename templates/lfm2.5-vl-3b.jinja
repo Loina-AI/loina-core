@@ -73,7 +73,7 @@
             {%- set ns.system_prompt = ns.system_prompt + ", " -%}
         {%- endif -%}
     {%- endfor -%}
-    {%- set ns.system_prompt = ns.system_prompt + "]" -%}
+    {%- set ns.system_prompt = ns.system_prompt + "]\nTo call a tool, write <|tool_call_start|>[tool_name(parameter='value')]<|tool_call_end|>. Use the listed tool names and parameters. Tool calls precede the final answer." -%}
 {%- endif -%}
 {%- if ns.system_prompt -%}
     {{- "<|im_start|>system\n" + ns.system_prompt + "<|im_end|>\n" -}}
