@@ -1,6 +1,8 @@
 /build*/
 /test-data/
 /.loina/
+/loina
+/loina-agent
 /.idea/
 /.vscode/
 /.cache/

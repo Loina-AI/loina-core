@@ -4,6 +4,7 @@
 #include "mtmd.h"
 #include "mtmd-helper.h"
 #include "jinja.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -44,7 +45,9 @@ static ggml_backend_dev_t gpu_device(unsigned bits, uint64_t minimum) {
     }
     return best;
 }
+static void llama_quiet_default(void);
 static unsigned llama_backends(void) {
+    llama_quiet_default();
     ggml_backend_load_all();
     unsigned bits=LOINA_CPU;
 #if defined(__aarch64__) || defined(_M_ARM64)
@@ -68,6 +71,23 @@ static bool load_progress(float progress, void *user) {
     return !loina_job_cancelled(job);
 }
 static bool abort_decode(void *user) { return loina_job_cancelled(((llama_state *)user)->job); }
+/* Reference hosts get quiet runtime logs (warnings/errors only). A host with
+ * its own bridge keeps it: Android installs one before open. */
+extern void ggml_log_callback_default(enum ggml_log_level level, const char * text, void * user_data);
+static void llama_quiet(enum ggml_log_level level, const char *text, void *user) {
+    (void)user;
+    if (level == GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_ERROR) {
+        fputs(text, stderr);
+        fflush(stderr);
+    }
+}
+static void llama_quiet_default(void) {
+    ggml_log_callback cur = NULL;
+    void *ud = NULL;
+    ggml_log_get(&cur, &ud);
+    if (cur == ggml_log_callback_default)
+        llama_log_set(llama_quiet, NULL);
+}
 static void llama_unload(void *pointer) {
     llama_state *s=pointer;
     if (!s) return;
@@ -80,6 +100,7 @@ static void llama_unload(void *pointer) {
 static void *llama_load(loina_engine *e, const loina_package *p, loina_job *job, loina_error *error) {
     char path[LOINA_PATH];
     if (!loina_artifact_path(e,p,0,path)) { loina_fail(error,LOINA_INVALID,"Invalid model path");return NULL; }
+    llama_quiet_default();
     llama_backend_init();
     ggml_backend_dev_t candidates[5];
     int count=0;

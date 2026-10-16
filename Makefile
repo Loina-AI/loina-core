@@ -13,3 +13,4 @@ test: all
 
 clean:
 	$(CMAKE) --build $(BUILD) --target clean
+	rm -f loina loina-agent

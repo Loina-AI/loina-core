@@ -138,18 +138,26 @@ contains the precision variants and their quantization recipe.
 
 ## Use the command line
 
-Start by inspecting the catalog and device capabilities:
+Build from this directory, ds4 style:
 
 ```sh
-./build/loina --models
-./build/loina --device
+make          # produces ./loina and ./loina-agent next to the sources
+./loina --models
+./loina --device
 ```
 
 With the catalog's chat GGUF on disk, ask a question:
 
 ```sh
-./build/loina -m /path/to/LFM2.5-VL-3B-Q4_K_M.gguf -p "Explain radix trees."
+./loina -m ../models/LFM2.5-VL-3B-Q4_K_M.gguf -p "Explain radix trees."
 ```
+
+`./loina` uses the same settings as the apps: web tools on for text/vision,
+2048 tokens with thinking (1024 plain), the immutable catalog resolver over
+llama.cpp, and vision through the chat weights plus mmproj. `--vision FILE`
+or `/read` with an image runs the vision layer; `/read` with text attaches a
+document. Web tools run through a Linux curl bridge that returns the same
+`# Search results` / `# Visited page` shape as the mobile WebView.
 
 Use `--backend CPU` or `--backend Vulkan` to test a particular available
 runtime. An unavailable backend returns an error instead of changing the choice.
@@ -164,18 +172,38 @@ The interactive commands are:
 | Command | Action |
 | --- | --- |
 | `/help` | Show usage |
+| `/think` / `/nothink` | Enable or disable reasoning (when the package allows it) |
+| `/tools on\|off` | Enable or disable web tools |
 | `/save` | Save the conversation and print its ID |
 | `/list` | List saved conversation IDs |
 | `/switch ID` | Open a saved conversation |
 | `/del ID` | Delete a saved conversation |
 | `/new` | Start a new conversation |
-| `/read FILE` | Submit an image to the vision model |
+| `/read FILE` | Submit a text document or an image to the vision model |
 | `/quit` | Exit |
 
 Ctrl+C interrupts generation. `--session ID` resumes a conversation at startup.
-Run `./build/loina --help` for context, sampling, image generation, and WAV
-transcription options. Browser tools require an embedding application's web
-callback.
+Run `./loina --help` for context, sampling, image generation, and WAV
+transcription options.
+
+## Use the agent
+
+`./loina-agent` is a ds4-style coding agent on the same core and runtime,
+inspired by `ds4_agent.c` and `q36_agent.c` but translated to loina commands
+(`loina_open`, `loina_job_create`, `loina_job_run` over llama.cpp):
+
+```sh
+./loina-agent -p "Fix the failing test in this directory" --chdir ~/src/proj
+./loina-agent --chdir ~/src/proj   # interactive REPL
+```
+
+The agent keeps the CLI session store, thinking flag, and vision layer, and
+adds local tools through a `<loina_tool_calls>` protocol (kept distinct from
+the core web markers so the core streams them as plain text for the agent to
+dispatch): `read`, `more`, `write`, `edit`, `search`, `list`, `bash`,
+`view_image`, `web_search`, `web_visit`. Use `--edit-upto` for anchored
+`[upto]` edits, `--vision FILE` to attach an image to the first task, and
+`/read FILE` inside the REPL for documents or images.
 
 ## Embed the library
 
