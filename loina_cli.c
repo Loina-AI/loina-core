@@ -553,7 +553,7 @@ static loina_status cli_web(void *user, const char *url, char **text, loina_job 
         append_text(&out, &olen, &ocap, "\n", 1);
         int found = 0;
         size_t pos = 0;
-        while (found < 3 && pos < n) {
+        while (found < 6 && pos < n) {
             const char *a = strstr(html + pos, "<a");
             if (!a)
                 break;
@@ -630,8 +630,8 @@ static loina_status cli_web(void *user, const char *url, char **text, loina_job 
             append_text(&out, &olen, &ocap, link, strlen(link));
             append_text(&out, &olen, &ocap, "\n", 1);
             if (snippet && *snippet) {
-                if (strlen(snippet) > 480)
-                    snippet[480] = 0;
+                if (strlen(snippet) > 640)
+                    snippet[640] = 0;
                 append_text(&out, &olen, &ocap, snippet, strlen(snippet));
                 append_text(&out, &olen, &ocap, "\n", 1);
             }
@@ -654,9 +654,8 @@ static loina_status cli_web(void *user, const char *url, char **text, loina_job 
             free(out);
             return web_fail(error, LOINA_MEMORY, "Cannot retain web page");
         }
-        /* Collapse to 6000 chars like the app extractor. */
-        if (strlen(plain) > 6000)
-            plain[6000] = 0;
+        if (strlen(plain) > 9000)
+            plain[9000] = 0;
         append_text(&out, &olen, &ocap, "# ", 2);
         append_text(&out, &olen, &ocap, title && *title ? title : url, strlen(title && *title ? title : url));
         append_text(&out, &olen, &ocap, "\n\nURL: ", 7);

@@ -101,8 +101,6 @@ loina_status loina_activate(loina_engine *e, const loina_package *p, loina_job *
     if (!r) return loina_fail(error,LOINA_UNSUPPORTED,"Runtime is not built: %s",p->runtime);
     if (r->abi!=p->runtime_abi) return loina_fail(error,LOINA_INCOMPATIBLE,"Package runtime ABI mismatch");
     if (!(r->backends() & p->backends & e->config.device.backends)) return loina_fail(error,LOINA_UNSUPPORTED,"No supported backend");
-    if (p->memory_bytes>loina_memory_budget(&e->config.device))
-        return loina_fail(error,LOINA_MEMORY,"Package exceeds the device memory budget");
     if (!loina_package_installed(e,p)) return loina_fail(error,LOINA_NOT_INSTALLED,"Download or import %s first",p->name);
     if (e->package && !strcmp(e->package->id,p->id)) {
         char a[65],b[65];

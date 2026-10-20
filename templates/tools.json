@@ -3,7 +3,7 @@
     "type": "function",
     "function": {
       "name": "web_search",
-      "description": "Search current information. Returns three results with URLs and snippets.",
+      "description": "Search the web. Returns up to six results with URLs, snippets, dates and available page excerpts. Use web_visit for missing details.",
       "parameters": {
         "type": "object",
         "properties": {

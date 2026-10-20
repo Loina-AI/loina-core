@@ -78,6 +78,16 @@ int main(int argc, char **argv) {
         llama_jinja_free(tmpl);
     }
     free(tools);
+    char *policy=loina_template_read(&e,"system.jinja",&error);check(policy);
+    llama_jinja *system=llama_jinja_create(policy,error.message,sizeof(error.message));check(system);free(policy);
+    char *online=llama_jinja_render(system,"{\"date\":\"2026-10-20\",\"local_date\":\"2026-10-20 (Tuesday, UTC+0200)\",\"tools\":true}",error.message,sizeof(error.message));
+    char *offline=llama_jinja_render(system,"{\"date\":\"2026-10-20\",\"tools\":false}",error.message,sizeof(error.message));
+    check(online && offline && strstr(online,"2026-10-20") && strstr(offline,"2026-10-20"));
+    check(strstr(online,"Tuesday, UTC+0200") && strstr(offline,"Current device date: 2026-10-20."));
+    check(strstr(online,"Use evidence to answer") && strstr(online,"For a news roundup"));
+    check(!strstr(offline,"Use evidence to answer") && !strstr(offline,"For a news roundup"));
+    check(strstr(offline,"Use supplied evidence") && strstr(offline,"Do not call tools."));
+    free(online);free(offline);llama_jinja_free(system);
     char *fallback=loina_template_model(&e,"missing-model.jinja",llama_jinja_default_template(),&error);check(fallback);
     llama_jinja *generic=llama_jinja_create(fallback,error.message,sizeof(error.message));check(generic);free(fallback);
     char *generic_prompt=render(generic,"[]",false,false,"A generic question.");

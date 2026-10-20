@@ -32,7 +32,7 @@ typedef struct {
     loina_feature feature;
     int quality;
     unsigned backends;
-    uint64_t memory_bytes;
+    uint64_t memory_bytes;       /* Informational estimate, not a selection gate. */
     size_t file_count;
     loina_artifact files[LOINA_MAX_FILES];
     const char *chat_template;    /* Filename in templates; NULL uses GGUF metadata. */

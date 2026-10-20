@@ -282,7 +282,7 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
         const char *answer=chat_answer(reply);
         bool unfinished=!answer || !*answer;
         if (!count && !malformed && !unfinished) break;
-        if (round==5 || (!r->tools && !unfinished)) {
+        if (round==5) {
             for (int i=0;i<count;i++) free(calls[i].argument);
             status=loina_fail(error,LOINA_RUNTIME_ERROR,"The model did not finish an answer; try with thinking disabled");break;
         }
@@ -304,8 +304,8 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
         }
         for (int i=0;i<count && !status;i++) {
             char *document=NULL;
-            if (requests>=4 || (calls[i].search && searches>=2)) {
-                document=loina_strdup("Tool error: No more web requests are available. Answer from the sources already returned.");
+            if (!r->tools || requests>=4 || (calls[i].search && searches>=2)) {
+                document=loina_strdup("Tool error: Web access is closed for this turn. No request was sent.");
                 r->tools=false;r->thinking=false;
             } else {
                 requests++;if (calls[i].search) searches++;
@@ -314,7 +314,8 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
             }
             if (status && status!=LOINA_CANCELLED && status!=LOINA_MEMORY) {
                 free(document);
-                document=loina_strdup("Tool error: This web request failed. Use earlier sources or try one different search. Do not invent current facts.");
+                /* Tool results report facts; the system prompt controls retries. */
+                document=loina_strdup("Tool error: This web request failed. No facts were returned.");
                 status=LOINA_OK;
                 if (error) memset(error,0,sizeof(*error));
             }

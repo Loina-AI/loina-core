@@ -15,7 +15,7 @@ the whisper.cpp fork.
 
 - Run chat, image understanding, image generation, and speech recognition
   through one C API.
-- Select a compatible model using the device's memory and available runtimes.
+- Select an installed model compatible with the available runtimes.
 - Install pinned model packages, checking file sizes and SHA-256 hashes before
   committing them to the local store.
 - Stream answers, report progress and timing, and cancel work in progress.
@@ -23,7 +23,7 @@ the whisper.cpp fork.
 - Run web tools through the application's native browser bridge.
 
 The catalog defines the supported models. Adding a model means checking its
-files, template, runtime compatibility, and memory requirements together.
+files, template, runtime compatibility, and memory estimates together.
 
 ## Why build this?
 
@@ -225,9 +225,10 @@ verification, prompt rendering, the tool loop, and conversation state.
 
 ## Conversations and memory
 
-The engine keeps one model resident at a time. Model selection leaves room for
-the application, drivers, context, and runtime buffers. Context is capped at
-32,768 tokens.
+The engine keeps one model resident at a time. Selection prefers installed
+packages, then catalog quality. Without an installed package it offers the
+highest-quality compatible download. RAM estimates do not reject or replace a
+model; the runtime reports allocation failures. Context is capped at 32,768 tokens.
 
 Saved conversations retain the full transcript. When the active context fills,
 the core removes the oldest complete turns from inference while preserving

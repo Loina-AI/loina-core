@@ -20,7 +20,8 @@ static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, lo
         static const char *search="<function name=\"web_search\"><param name=\"query\">test</param></function>";
         static const char *visit="<function name=\"web_visit\"><param name=\"url\">https://example.com/?a=1&amp;b=2</param></function>";
         int step=tool_step++;
-        *out=loina_strdup(!j->request.tools ? "Answer from the available sources." :
+        *out=loina_strdup(tool_chat==26 && step<4 ? search :
+            !j->request.tools ? "Answer from the available sources." :
             tool_chat==6 ? (step==0 ? search : step==1 ? visit : "Answer using the first result despite the failed page.") :
             tool_chat==7 ? (step<2 ? search : "Answer using the second search result.") :
             tool_chat==8 ? "<think>First. Second. Third. Fourth.</think>\nAnswer." :
@@ -111,6 +112,20 @@ int main(int argc, char **argv) {
     check(text_packages==3);
     check(!strcmp(loina_resolve(e,LOINA_TEXT,&error)->chat_template,"lfm2.5-vl-3b.jinja"));
     check(!loina_resolve(e,LOINA_TEXT,&error)->thinking);
+    const loina_package *optional=loina_catalog_find("minicpm-v-4_7-1b-q8_0-b2ad48e4359d73b9");
+    char optional_dir[LOINA_PATH],optional_path[LOINA_PATH],optional_hash[65];
+    check(optional && loina_path(optional_dir,e->directory,"packages",optional->id) && loina_mkdir(optional_dir));
+    check(loina_artifact_path(e,optional,0,optional_path));
+    /* Sparse weights exercise installed-package selection without a download. */
+    FILE *weights=fopen(optional_path,"wb");check(weights);
+    check(!fseek(weights,(long)optional->files[0].bytes-1,SEEK_SET) && fputc(0,weights)!=EOF && !fclose(weights));
+    loina_package_identity(optional,optional_hash);
+    check(loina_path(optional_path,optional_dir,"ready",NULL));write_file(optional_path,optional_hash,64);
+    check(loina_resolve(e,LOINA_TEXT,&error)==optional);
+    e->config.device.ram_bytes=e->config.device.available_ram_bytes=1000;
+    check(loina_package_compatible(e,optional) && loina_resolve(e,LOINA_TEXT,&error)==optional);
+    check(loina_uninstall(e,optional,&error)==LOINA_OK);
+    e->config.device.ram_bytes=16000000000;e->config.device.available_ram_bytes=10000000000;
     loina_request image=loina_request_default(LOINA_IMAGE);
     check(image.width==1024 && image.height==1024 && image.steps==2);
     image.prompt="A red fox";image.output_path="fox.png";
@@ -140,7 +155,7 @@ int main(int argc, char **argv) {
     e->config.device.backends=LOINA_CPU|LOINA_VULKAN;
     e->config.device.available_ram_bytes=1000;
     selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==12);
-    e->config.device.ram_bytes=3000000000;check(!loina_resolve(e,LOINA_TEXT,&error));
+    e->config.device.ram_bytes=1000;check(loina_resolve(e,LOINA_TEXT,&error)==selected);
     e->config.device.ram_bytes=16000000000;
     e->config.device.storage_bytes=1;check(loina_resolve(e,LOINA_TEXT,&error));
     e->config.device.storage_bytes=20000000000;
@@ -297,6 +312,15 @@ int main(int argc, char **argv) {
         check(!strstr(visible.data,"<|tool_call_start|>"));
         free(visible.data);loina_job_free(j);
     }
+    tool_chat=26;tool_step=0;request.prompt="Finish after requesting a tool that is no longer available";
+    int calls=web_calls;
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK && web_calls==calls+2 && tool_step==5);
+    check(strstr(loina_job_result(j),"available sources"));loina_job_free(j);
+    request.tools=false;tool_step=0;calls=web_calls;
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK && web_calls==calls);
+    loina_job_free(j);request.tools=true;
     tool_chat=0;p.thinking=false;
     j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_OK && !thinking_requested && j->request.thinking);

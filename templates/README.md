@@ -26,7 +26,9 @@ To switch a catalog model, update its artifact definitions and `template` in
 for tools and `tokenizer.chat_template` for plain chat, with its ChatML fallback
 when neither exists. The same `system.jinja` instructions are passed to every model. Model templates receive
 `messages`, `tools`, `enable_thinking`, `add_generation_prompt`, `bos_token`, and
-`eos_token`. `system.jinja` receives `date` and a boolean `tools`.
+`eos_token`. `system.jinja` receives the device's current ISO `date`,
+`local_date` with weekday and UTC offset, and a boolean `tools`. The clock is
+read on each render, including tool continuations and chats kept open overnight.
 
 CMake bundles these files for Android and other hosts. Rebuilding picks up edits.
 For local experiments, override any file without rebuilding:

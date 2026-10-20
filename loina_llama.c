@@ -212,11 +212,15 @@ static char *special_token(const struct llama_vocab *vocab, llama_token token) {
     text[actual]=0;return text;
 }
 static char *render(llama_state *state, loina_session *session, loina_job *job, loina_error *error) {
-    char date[32]="",context[128],message[512]="";
+    char date[32]="",local_date[80]="",context[256],message[512]="";
     time_t now=time(NULL);
     struct tm *today=localtime(&now);
-    if (today) strftime(date,sizeof(date),"%Y-%m-%d",today);
-    snprintf(context,sizeof(context),"{\"date\":\"%s\",\"tools\":%s}",date,job->request.tools ? "true" : "false");
+    if (today) {
+        strftime(date,sizeof(date),"%Y-%m-%d",today);
+        strftime(local_date,sizeof(local_date),"%Y-%m-%d (%A, UTC%z)",today);
+    }
+    snprintf(context,sizeof(context),"{\"date\":\"%s\",\"local_date\":\"%s\",\"tools\":%s}",
+        date,local_date,job->request.tools ? "true" : "false");
     char *system=llama_jinja_render(state->system_template,context,message,sizeof(message));
     if (!system) { loina_fail(error,LOINA_UNSUPPORTED,"Cannot render system template: %s",message);return NULL; }
     const struct llama_vocab *vocab=llama_model_get_vocab(state->model);

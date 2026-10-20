@@ -72,7 +72,6 @@ bool loina_package_valid(const loina_package *);
 void loina_package_identity(const loina_package *, char hex[65]);
 const loina_runtime *loina_runtime_find(const char *);
 unsigned loina_runtime_backends(void);
-uint64_t loina_memory_budget(const loina_device *);
 loina_status loina_activate(loina_engine *, const loina_package *, loina_job *, loina_error *);
 void loina_unload(loina_engine *);
 bool loina_artifact_path(loina_engine *, const loina_package *, size_t, char path[LOINA_PATH]);

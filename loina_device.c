@@ -63,14 +63,6 @@ loina_status loina_device_probe(const char *directory, loina_device *d, loina_er
     return LOINA_OK;
 }
 
-uint64_t loina_memory_budget(const loina_device *d) {
-    uint64_t available=d->available_ram_bytes;
-    /* A phone can reclaim cached pages; a momentary low free-RAM reading
-     * should not make a model disappear from the catalog. */
-    if (available<d->ram_bytes/2) available=d->ram_bytes/2;
-    return available-available/4;
-}
-
 bool loina_package_compatible(loina_engine *e, const loina_package *p) {
     if (!e || !loina_package_valid(p)) return false;
     const loina_runtime *r=loina_runtime_find(p->runtime);
@@ -78,20 +70,21 @@ bool loina_package_compatible(loina_engine *e, const loina_package *p) {
     const loina_device *d=&e->config.device;
     unsigned backends=r->backends() & d->backends & p->backends;
     if (!(backends & (LOINA_CPU|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA|LOINA_OPENCL))) return false;
-    return p->memory_bytes<=loina_memory_budget(d);
+    return true;
 }
 const loina_package *loina_resolve(loina_engine *e, loina_feature feature, loina_error *error) {
     if (!e || feature<LOINA_TEXT || feature>LOINA_SPEECH) {
         loina_fail(error,LOINA_INVALID,"Invalid model selection request"); return NULL;
     }
     const loina_package *best=NULL;
-    /* Leave room for the app, drivers and OS. Package estimates include the
-     * default quantized 32K KV allocation and runtime scratch buffers. */
+    /* Use installed weights before offering a download. Allocation failures
+     * belong to the runtime; RAM estimates must not substitute another model. */
     for (size_t i=0;i<loina_catalog_count();i++) {
         const loina_package *p=loina_catalog_get(i);
         if (p->feature!=feature || !loina_package_compatible(e,p)) continue;
-        if (!best || p->quality>best->quality) best=p;
+        bool installed=loina_package_installed(e,p),have=best && loina_package_installed(e,best);
+        if (!best || (installed && !have) || (installed==have && p->quality>best->quality)) best=p;
     }
-    if (!best) loina_fail(error,LOINA_UNSUPPORTED,"No compatible package fits this device's memory and runtimes");
+    if (!best) loina_fail(error,LOINA_UNSUPPORTED,"No compatible package supports this device's runtimes");
     return best;
 }
