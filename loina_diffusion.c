@@ -2,6 +2,7 @@
 #include "stable-diffusion.h"
 #include "ggml-backend.h"
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
@@ -14,7 +15,21 @@
 #ifndef LOINA_DIFFUSION_REVISION
 #define LOINA_DIFFUSION_REVISION "unknown"
 #endif
-typedef struct { sd_ctx_t *context; loina_job *job; } diffusion_state;
+typedef struct {
+    sd_ctx_t *context;
+    loina_job *job;
+    ggml_log_callback log;
+    void *log_user;
+    int progress;
+    bool decoding;
+    char preview[LOINA_PATH];
+} diffusion_state;
+static void diffusion_log(enum sd_log_level_t level, const char *text, void *pointer) {
+    diffusion_state *s=pointer;
+    enum ggml_log_level severity=level==SD_LOG_ERROR ? GGML_LOG_LEVEL_ERROR :
+        level==SD_LOG_WARN ? GGML_LOG_LEVEL_WARN : level==SD_LOG_INFO ? GGML_LOG_LEVEL_INFO : GGML_LOG_LEVEL_DEBUG;
+    if (s->log) s->log(severity,text,s->log_user);
+}
 static unsigned diffusion_backends(void) {
 #ifdef LOINA_WITH_LLAMA
     return loina_llama.backends();
@@ -44,19 +59,44 @@ static void *diffusion_load(loina_engine *e, const loina_package *p, loina_job *
     else if (e->selected_backend==LOINA_METAL) params.backend="Metal";
     else if (e->selected_backend==LOINA_CUDA) params.backend="CUDA";
     else if (!(diffusion_backends() & e->config.device.backends & (LOINA_OPENCL|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA))) params.backend="CPU";
+    ggml_log_get(&s->log,&s->log_user);
+    sd_set_log_callback(diffusion_log,s);
     s->context=new_sd_ctx(&params);
-    if (!s->context) { free(s);loina_fail(error,LOINA_RUNTIME_ERROR,"Cannot initialize Sana Sprint package");return NULL; }
+    /* Chat shares GGML's logger; SD messages keep their separate callback. */
+    ggml_log_set(s->log,s->log_user);
+    if (!s->context) {
+        sd_set_log_callback(NULL,NULL);ggml_log_set(s->log,s->log_user);free(s);
+        loina_fail(error,LOINA_RUNTIME_ERROR,"Cannot initialize Sana Sprint package");return NULL;
+    }
     return s;
 }
 static void diffusion_unload(void *pointer) {
     diffusion_state *s=pointer;
-    free_sd_ctx(s->context);free(s);
+    free_sd_ctx(s->context);
+    sd_set_log_callback(NULL,NULL);ggml_log_set(s->log,s->log_user);free(s);
 }
 static void diffusion_progress(int step, int steps, float time, void *pointer) {
     (void)time;
     diffusion_state *s=pointer;
-    loina_job_progress(s->job,(uint64_t)step,(uint64_t)steps);
+    if (!s->decoding && steps==s->job->request.steps && step>0) {
+        int progress=10+20*step/steps;
+        if (progress>s->progress) {
+            s->progress=progress;
+            loina_emit(s->job,LOINA_PROGRESS,"Imagining",9,progress);
+        }
+    }
     if (loina_job_cancelled(s->job)) sd_cancel_generation(s->context,SD_CANCEL_ALL);
+}
+static bool diffusion_decode(int tile, int tiles, const sd_image_t *image, void *pointer) {
+    diffusion_state *s=pointer;
+    s->decoding=true;
+    s->progress=30+(tiles ? 69*tile/tiles : 0);
+    loina_emit(s->job,LOINA_PROGRESS,"Adding detail",13,s->progress);
+    if (image && *s->preview && !loina_job_cancelled(s->job) &&
+        !loina_png(s->preview,image->data,(int)image->width,(int)image->height,(int)image->channel,NULL))
+        loina_emit(s->job,LOINA_IMAGE_PREVIEW,s->preview,strlen(s->preview),s->progress);
+    if (loina_job_cancelled(s->job)) sd_cancel_generation(s->context,SD_CANCEL_ALL);
+    return !loina_job_cancelled(s->job);
 }
 static loina_status diffusion_image(void *pointer, loina_job *job, loina_error *error) {
     diffusion_state *s=pointer;
@@ -73,6 +113,8 @@ static loina_status diffusion_image(void *pointer, loina_job *job, loina_error *
     params.batch_count=1;
     params.vae_tiling_params.enabled=true;
     params.vae_tiling_params.tile_size_w=256;params.vae_tiling_params.tile_size_h=256;
+    /* Keep blend margins while avoiding the default half-tile overlap. */
+    params.vae_tiling_params.target_overlap=0.25f;
     if (job->input && *job->input) {
         struct stat file;
         int width,height,channels;
@@ -85,13 +127,18 @@ static loina_status diffusion_image(void *pointer, loina_job *job, loina_error *
         params.init_image.width=(uint32_t)width;params.init_image.height=(uint32_t)height;params.init_image.channel=3;
     }
     s->job=job;
+    s->progress=0;s->decoding=false;
+    if (snprintf(s->preview,sizeof(s->preview),"%s.preview.png",job->output)>=(int)sizeof(s->preview)) s->preview[0]=0;
     sd_cancel_generation(s->context,SD_CANCEL_RESET);
     sd_set_progress_callback(diffusion_progress,s);
+    sd_set_decode_callback(diffusion_decode,s);
+    loina_emit(job,LOINA_PROGRESS,"Preparing image",15,0);
     sd_image_t *images=NULL;
     int count=0;
     bool ok=generate_image(s->context,&params,&images,&count);
     stbi_image_free(params.init_image.data);
-    sd_set_progress_callback(NULL,NULL);s->job=NULL;
+    sd_set_progress_callback(NULL,NULL);sd_set_decode_callback(NULL,NULL);s->job=NULL;
+    if (*s->preview) remove(s->preview);
     loina_status status;
     if (loina_job_cancelled(job)) status=loina_fail(error,LOINA_CANCELLED,"Image generation cancelled");
     else if (!ok || count<1) status=loina_fail(error,LOINA_RUNTIME_ERROR,"Image generation failed");

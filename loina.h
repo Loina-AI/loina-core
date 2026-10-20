@@ -56,8 +56,11 @@ typedef struct {
 } loina_message;
 typedef enum {
     LOINA_LOADING = 1, LOINA_TOKEN, LOINA_PROGRESS, LOINA_COMPACTED,
-    LOINA_TOOL, LOINA_FINISHED, LOINA_METRICS
+    LOINA_TOOL, LOINA_FINISHED, LOINA_METRICS, LOINA_IMAGE_PREVIEW
 } loina_event;
+/* LOINA_IMAGE_PREVIEW carries the path of a temporary RGBA PNG thumbnail.
+ * Read it during the callback; it is replaced by later previews and removed
+ * when generation finishes. Progress is monotonic and remains below 100. */
 /* LOINA_METRICS carries JSON: prefill/decode in tokens per second, the backend
  * bit actually used, and context/capacity in tokens. Measurements exclude
  * model loading and KV I/O. */
