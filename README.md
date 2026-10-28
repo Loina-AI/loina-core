@@ -71,9 +71,8 @@ The current catalog contains:
 
 | Use | Model package |
 | --- | --- |
-| Default chat | LFM2.5-VL-3B, Q4_K_M |
-| Optional core chat | MiniCPM-V-4.7-1B Q8_0 and Bartowski MiniCPM5-2B Q4_K_M |
-| Vision | LFM2.5-VL-3B with mmproj-BF16.gguf |
+| Default chat | LFM3-VL-2B, QAD Q4_0 |
+| Vision | LFM3-VL-2B with mmproj-LFM3-VL-2B-F16.gguf |
 | Speech recognition | Parakeet TDT 0.6B v3, Q4_K |
 | Image generation | Sana Sprint 0.6B, protected Q8_0, with Gemma 2 Q4_K_M and full FP16 DC-AE |
 
@@ -82,14 +81,15 @@ pinned revision, filenames, hashes, sizes, license, and runtime ABI. See
 [loina_catalog.c](loina_catalog.c) for the exact artifacts. Regenerate the
 catalog with `node tools/catalog.cjs` (requires Hugging Face API access).
 
-LFM2.5-VL uses temperature 0.2, top-k 50, top-p 1, min-p 0 and repetition
-penalty 1, following the [official model card](https://huggingface.co/LiquidAI/LFM2.5-VL-3B).
-It answers directly and has thinking disabled. Thinking remains a general request
-option: packages declare the capability, and supported models retain streaming
-reasoning and recovery when reasoning reaches the token limit. MiniCPM-V and
-MiniCPM5 remain optional core packages. Android selects LFM and has no model selector.
-For MiniCPM-V use `--temp 0.7 --top-p 0.95`; MiniCPM5 retains top-k 40 and
-supports `--temp 1.0 --top-p 0.95`.
+LFM3-VL uses temperature 0.1, top-k 50, top-p 1, min-p 0 and repetition
+penalty 1.1, following the [official model card](https://huggingface.co/LiquidAI/LFM3-VL-2B).
+Reasoning is on by default. Android's composer toggles it and shows streaming
+reasoning separately from the answer, with a disclosure after completion.
+Earlier reasoning is removed from subsequent model prompts. LFM3 is the only
+chat and vision model. Upgrades remove the retired LFM2.5 and MiniCPM packages.
+Saved conversations retain all messages and migrate to LFM3 on the next reply.
+Their old KV caches are incompatible; the core replays the transcript with the
+new tokenizer and model, compacting only when the context limit requires it.
 
 Chat prompts live in [templates](templates/README.md). The model's `.jinja` file
 receives `messages`, OpenAI function definitions in `tools`, `enable_thinking`,
@@ -101,14 +101,14 @@ uses llama.cpp's GGUF template (`tool_use` for tools, otherwise the default),
 then llama.cpp's ChatML fallback if the model supplies neither. Files are bundled at
 build time; `--templates PATH` or `loina_config.template_directory` overrides
 individual files without rebuilding. Restart the engine to load edited files.
-The core dispatches MiniCPM XML calls and LFM Python-style calls. It parses the
+The core dispatches LFM3 XML calls and accepts legacy call syntax in saved histories. It parses the
 call syntax without executing Python; unknown functions, extra parameters and
 incomplete batches are rejected before any tool runs. Adding another output
 format also requires a parser. Defining a new tool does not register an
 implementation.
 
 The chat package contains only the language weights. The vision package
-reuses those installed weights and downloads `mmproj-BF16.gguf` when the host
+reuses those installed weights and downloads `mmproj-LFM3-VL-2B-F16.gguf` when the host
 requests vision. The download size excludes artifacts already installed in
 another package; the reused bytes are hashed again before installation.
 Parakeet uses the [cstr GGUF conversion](https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF).
@@ -149,7 +149,7 @@ make          # produces ./loina and ./loina-agent next to the sources
 With the catalog's chat GGUF on disk, ask a question:
 
 ```sh
-./loina -m ../models/LFM2.5-VL-3B-Q4_K_M.gguf -p "Explain radix trees."
+./loina -m ../models/LFM3-VL-2B-QAD-Q4_0.gguf -p "Explain radix trees."
 ```
 
 `./loina` uses the same settings as the apps: web tools on for text/vision,

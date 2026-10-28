@@ -24,7 +24,8 @@ typedef struct {
     loina_job *job;
     llama_jinja *chat_template, *tool_template, *system_template;
     char *tools;
-    bool thinking_prefix, minicpm5, lfm2;
+    const char *thinking_prefix;
+    bool lfm3;
 } llama_state;
 
 static ggml_backend_dev_t gpu_device(unsigned bits, uint64_t minimum) {
@@ -159,10 +160,9 @@ static void *llama_load(loina_engine *e, const loina_package *p, loina_job *job,
         loina_sha_update(&identity,s->tools,strlen(s->tools)+1);
         loina_sha_final(&identity,e->chat_identity);
         free(chat);free(tool);free(system);
-        s->minicpm5=p->chat_template && !strcmp(p->chat_template,"minicpm5-2b.jinja");
         char architecture[64]="";
         llama_model_meta_val_str(s->model,"general.architecture",architecture,sizeof(architecture));
-        s->lfm2=!strncmp(architecture,"lfm2",4);
+        s->lfm3=!strcmp(architecture,"lfm3");
         struct llama_context_params cp=llama_context_default_params();
         cp.n_ctx=e->config.context;
         int32_t trained=llama_model_n_ctx_train(s->model);
@@ -258,7 +258,8 @@ static char *render(llama_state *state, loina_session *session, loina_job *job, 
     if (!n || n>LOINA_MAX_TEXT) { free(prompt);loina_fail(error,LOINA_INVALID,"Rendered prompt is too large or empty");return NULL; }
     /* The opening thought marker is part of the generation prefill, so it
      * must also reach the transcript and the existing reasoning display. */
-    state->thinking_prefix=n>=8 && !strcmp(prompt+n-8,"<think>\n");
+    state->thinking_prefix=n>=8 && !strcmp(prompt+n-8,"<think>\n") ? "<think>\n" :
+        n>=7 && !strcmp(prompt+n-7,"<think>") ? "<think>" : NULL;
     return prompt;
 }
 static int decode(llama_state *s, const llama_token *tokens, int count, int position) {
@@ -355,8 +356,8 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
     if (!sampler) { status=loina_fail(error,LOINA_MEMORY,"Cannot allocate sampler");goto done; }
     if (job->request.temperature==0) llama_sampler_chain_add(sampler,llama_sampler_init_greedy());
     else {
-        if (!s->minicpm5 && !s->lfm2) llama_sampler_chain_add(sampler,llama_sampler_init_penalties(llama_vocab_n_tokens(vocab),(int32_t)s->context_size,1.03f,0.0f,0.0f));
-        llama_sampler_chain_add(sampler,llama_sampler_init_top_k(s->lfm2 ? 50 : s->minicpm5 ? 40 : 100));
+        llama_sampler_chain_add(sampler,llama_sampler_init_penalties(llama_vocab_n_tokens(vocab),s->lfm3 ? 64 : (int32_t)s->context_size,s->lfm3 ? 1.1f : 1.03f,0.0f,0.0f));
+        llama_sampler_chain_add(sampler,llama_sampler_init_top_k(s->lfm3 ? 50 : 100));
         llama_sampler_chain_add(sampler,llama_sampler_init_top_p(job->request.top_p,1));
         if (job->request.min_p>0) llama_sampler_chain_add(sampler,llama_sampler_init_min_p(job->request.min_p,1));
         llama_sampler_chain_add(sampler,llama_sampler_init_temp(job->request.temperature));
@@ -364,8 +365,8 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
     }
     for (size_t i=0;!s->vision && i<s->count;i++) llama_sampler_accept(sampler,s->tokens[i]);
     if (s->thinking_prefix) {
-        if (!loina_buffer_puts(&output,"<think>\n")) { status=loina_fail(error,LOINA_MEMORY,"Cannot retain reasoning prefix");goto done; }
-        loina_emit(job,LOINA_TOKEN,"<think>\n",8,0);
+        if (!loina_buffer_puts(&output,s->thinking_prefix)) { status=loina_fail(error,LOINA_MEMORY,"Cannot retain reasoning prefix");goto done; }
+        loina_emit(job,LOINA_TOKEN,s->thinking_prefix,strlen(s->thinking_prefix),0);
     }
     decode_start=llama_time_us();
     for (uint32_t i=0;i<job->request.max_tokens;i++) {

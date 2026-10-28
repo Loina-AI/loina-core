@@ -10,6 +10,30 @@
 #include <unistd.h>
 #endif
 
+loina_status loina_packages_upgrade(loina_engine *e, loina_error *error) {
+    static const struct { const char *id,*model,*projector; } retired[]={
+        {"lfm2-5-vl-3b-q4_k_m-c815851c1e0a1361","LFM2.5-VL-3B-Q4_K_M.gguf",NULL},
+        {"lfm2-5-vl-3b-q4_k_m-8f72ca4c841abd9c","LFM2.5-VL-3B-Q4_K_M.gguf","mmproj-BF16.gguf"},
+        {"minicpm-v-4_7-1b-q8_0-b2ad48e4359d73b9","MiniCPM-V-4_7-1B-Q8_0.gguf",NULL},
+        {"minicpm-v-4_7-1b-q8_0-0a441f54cc0b025b","MiniCPM-V-4_7-1B-Q8_0.gguf","mmproj-model-f16.gguf"},
+        {"minicpm5-2b-q4_k_m-533e8c9b33ab3103","MiniCPM5-2B-Q4_K_M.gguf",NULL}
+    };
+    for (size_t i=0;i<sizeof(retired)/sizeof(*retired);i++) for (int partial=0;partial<2;partial++) {
+        char name[256],dir[LOINA_PATH],path[LOINA_PATH];
+        snprintf(name,sizeof(name),"%s%s",retired[i].id,partial ? ".partial" : "");
+        if (!loina_path(dir,e->directory,"packages",name)) return loina_fail(error,LOINA_INVALID,"Retired package path is too long");
+        const char *files[]={retired[i].model,retired[i].projector,"ready"};
+        for (size_t j=0;j<3;j++) if (files[j]) for (int range=-1;range<4;range++) {
+            if (range<0) snprintf(name,sizeof(name),"%s",files[j]);
+            else snprintf(name,sizeof(name),"%s.range-%d",files[j],range);
+            if (!loina_path(path,dir,name,NULL) || (remove(path) && errno!=ENOENT))
+                return loina_fail(error,LOINA_IO,"Cannot remove retired weights: %s",name);
+        }
+        if (rmdir(dir) && errno!=ENOENT) return loina_fail(error,LOINA_IO,"Cannot remove retired package: %s",retired[i].id);
+    }
+    return LOINA_OK;
+}
+
 const loina_package *loina_catalog_find(const char *id) {
     if (!id) return NULL;
     for (size_t i=0;i<loina_catalog_count();i++) {

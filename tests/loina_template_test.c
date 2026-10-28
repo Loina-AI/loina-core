@@ -25,67 +25,35 @@ int main(int argc, char **argv) {
     loina_engine e={0};
     loina_error error={0};
     char *tools=loina_template_read(&e,"tools.json",&error);check(tools);
-    const char *names[]={"minicpm-v4.7-1b.jinja","minicpm5-2b.jinja","lfm2.5-vl-3b.jinja"};
-    for (size_t i=0;i<3;i++) {
-        char *source=loina_template_read(&e,names[i],&error);check(source);
-        char message[512]="";
-        llama_jinja *tmpl=llama_jinja_create(source,message,sizeof(message));
-        if (!tmpl) fprintf(stderr,"%s\n",message);
-        check(tmpl);free(source);
-        char *prompt=render(tmpl,"[]",true,false,"Search today.");
-        check(i==2 ? !strstr(prompt,"<think>") : !strcmp(prompt+strlen(prompt)-8,"<think>\n"));
-        check(strstr(prompt,"Local assistant."));
-        check(!strstr(prompt,"# Tools"));free(prompt);
-        prompt=render(tmpl,tools,false,false,"Search today.");
-        if (i==2) {
-            check(strstr(prompt,"List of tools: [") && !strstr(prompt,"\"function\":") && !strstr(prompt,"<think>"));
-        } else {
-            check(!strcmp(prompt+strlen(prompt)-19,"<think>\n\n</think>\n\n"));
-            check(strstr(prompt,"# Tools") && strstr(prompt,"\"type\": \"function\""));
-        }
-        check(strstr(prompt,"web_search"));free(prompt);
-        prompt=render(tmpl,tools,true,true,"Search today.");
-        if (i==2) {
-            check(strstr(prompt,"<|im_start|>tool\nSource says 42.<|im_end|>"));
-            check(strstr(prompt,"<|tool_call_start|>[web_search(query='test')]<|tool_call_end|>"));
-        } else {
-            check(strstr(prompt,"<tool_response>\nSource says 42.\n</tool_response>"));
-            check(strstr(prompt,i ? "<function name=\"web_search\">" : "<function=web_search>"));
-            check(strstr(prompt,"<think>\nCheck sources.\n</think>"));
-        }
+    char *lfm3=loina_template_read(&e,"lfm3-vl-2b.jinja",&error);check(lfm3);
+    llama_jinja *liquid=llama_jinja_create(lfm3,error.message,sizeof(error.message));check(liquid);free(lfm3);
+    for (int thinking=0;thinking<2;thinking++) {
+        char *prompt=render(liquid,tools,thinking,true,"Search today.");
+        const char *suffix=thinking ? "<think>" : "<think></think>";
+        check(!strcmp(prompt+strlen(prompt)-strlen(suffix),suffix));
+        check(!strncmp(prompt,"<s><|im_start|>system\n",22));
+        check(strstr(prompt,"<tools>\n") && strstr(prompt,"<function=web_search>"));
+        check(strstr(prompt,"<|im_start|>tool\n<tool_response>\nSource says 42.\n</tool_response>"));
+        check(strstr(prompt,"<think>Check sources.</think>"));
+        check(strstr(prompt,"<think></think>An earlier answer."));
+        check(strstr(prompt,"</tool_response><|im_end|>\n<|im_start|>user\nSearch today.<|im_end|>"));
         free(prompt);
-        const char *questions[]={"What does the source say?","Что сообщает источник?","¿Qué dice la fuente?","来源说了什么？",
-            "Come gestire la nausea in gravidanza?","¿Qué dice la fuente? Answer in English."};
-        for (size_t q=0;q<sizeof(questions)/sizeof(*questions);q++) for (int thinking=0;thinking<2;thinking++) {
-            prompt=render(tmpl,tools,thinking,true,questions[q]);
-            if (i==2) {
-                const char *question=strstr(prompt,questions[q]);check(question);
-                check(!strstr(question+strlen(questions[q]),questions[q]));
-                check(strstr(question,"<|im_start|>tool\nSource says 42."));
-            } else {
-                const char *evidence=strstr(prompt,"</tool_response>");check(evidence);
-                loina_buffer turn={0};
-                check(loina_buffer_puts(&turn,"</tool_response><|im_end|>\n<|im_start|>user\n") && loina_buffer_puts(&turn,questions[q]) &&
-                    loina_buffer_puts(&turn,"<|im_end|>\n<|im_start|>assistant\n<think>"));
-                if (!strstr(evidence,turn.data)) fprintf(stderr,"Template %s: %s\n",names[i],evidence);
-                check(strstr(evidence,turn.data));free(turn.data);
-            }
-            free(prompt);
-            prompt=render(tmpl,tools,thinking,false,questions[q]);
-            const char *question=strstr(prompt,questions[q]);check(question && !strstr(question+strlen(questions[q]),questions[q]));free(prompt);
-        }
-        check(!llama_jinja_render(tmpl,"{broken",message,sizeof(message)) && *message);
-        llama_jinja_free(tmpl);
+        prompt=render(liquid,tools,thinking,true,"Что сообщает источник?");
+        check(strstr(prompt,"</tool_response><|im_end|>\n<|im_start|>user\nЧто сообщает источник?<|im_end|>"));free(prompt);
+        prompt=render(liquid,"[]",thinking,false,"Что сообщает источник?");
+        check(!strstr(prompt,"<tools>") && strstr(prompt,"Что сообщает источник?"));
+        check(!strcmp(prompt+strlen(prompt)-strlen(suffix),suffix));free(prompt);
     }
-    free(tools);
+    free(tools);llama_jinja_free(liquid);
     char *policy=loina_template_read(&e,"system.jinja",&error);check(policy);
     llama_jinja *system=llama_jinja_create(policy,error.message,sizeof(error.message));check(system);free(policy);
     char *online=llama_jinja_render(system,"{\"date\":\"2026-10-20\",\"local_date\":\"2026-10-20 (Tuesday, UTC+0200)\",\"tools\":true}",error.message,sizeof(error.message));
     char *offline=llama_jinja_render(system,"{\"date\":\"2026-10-20\",\"tools\":false}",error.message,sizeof(error.message));
     check(online && offline && strstr(online,"2026-10-20") && strstr(offline,"2026-10-20"));
     check(strstr(online,"Tuesday, UTC+0200") && strstr(offline,"Current device date: 2026-10-20."));
-    check(strstr(online,"Use evidence to answer") && strstr(online,"For a news roundup"));
-    check(!strstr(offline,"Use evidence to answer") && !strstr(offline,"For a news roundup"));
+    check(strstr(online,"Call web_search before answering") && !strstr(offline,"Call web_search before answering"));
+    const char *common[]={"Keep that language for short follow-ups", "cover several distinct relevant items", "Use sources as evidence"};
+    for (size_t i=0;i<sizeof(common)/sizeof(*common);i++) check(strstr(online,common[i]) && strstr(offline,common[i]));
     check(strstr(offline,"Use supplied evidence") && strstr(offline,"Do not call tools."));
     free(online);free(offline);llama_jinja_free(system);
     char *fallback=loina_template_model(&e,"missing-model.jinja",llama_jinja_default_template(),&error);check(fallback);

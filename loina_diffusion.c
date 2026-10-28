@@ -133,17 +133,19 @@ static loina_status diffusion_image(void *pointer, loina_job *job, loina_error *
     sd_set_progress_callback(diffusion_progress,s);
     sd_set_decode_callback(diffusion_decode,s);
     loina_emit(job,LOINA_PROGRESS,"Preparing image",15,0);
-    sd_image_t *images=NULL;
-    int count=0;
-    bool ok=generate_image(s->context,&params,&images,&count);
+    sd_image_generation_result_t *images=NULL;
+    bool ok=generate_image(s->context,&params,&images);
     stbi_image_free(params.init_image.data);
     sd_set_progress_callback(NULL,NULL);sd_set_decode_callback(NULL,NULL);s->job=NULL;
     if (*s->preview) remove(s->preview);
     loina_status status;
     if (loina_job_cancelled(job)) status=loina_fail(error,LOINA_CANCELLED,"Image generation cancelled");
-    else if (!ok || count<1) status=loina_fail(error,LOINA_RUNTIME_ERROR,"Image generation failed");
-    else status=loina_png(job->output,images[0].data,(int)images[0].width,(int)images[0].height,(int)images[0].channel,error);
-    if (images) free_sd_images(images,count);
+    else if (!ok || !images || images->count<1) status=loina_fail(error,LOINA_RUNTIME_ERROR,"Image generation failed");
+    else {
+        sd_image_t *image=&images->items[0].image;
+        status=loina_png(job->output,image->data,(int)image->width,(int)image->height,(int)image->channel,error);
+    }
+    if (images) free_sd_image_generation_result(images);
     return status;
 }
 const loina_runtime loina_diffusion={

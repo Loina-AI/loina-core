@@ -3,7 +3,7 @@
 #include <string.h>
 
 static bool cache_paths(loina_engine *e, loina_session *s, char *state, char *stamp) {
-    if (!e->package || !e->runtime || !loina_name_valid(s->id)) return false;
+    if (s->temporary || !e->package || !e->runtime || !loina_name_valid(s->id)) return false;
     char identity[65],key[65],config[128],dir[LOINA_PATH],name[160];
     loina_package_identity(e->package,identity);
     loina_sha hash;

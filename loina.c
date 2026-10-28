@@ -55,6 +55,7 @@ loina_engine *loina_open(const loina_config *c, loina_error *error) {
             loina_fail(error,LOINA_IO,"Cannot create %s directory",dirs[i]); free(e); return NULL;
         }
     }
+    if (loina_packages_upgrade(e,error)) { free(e);return NULL; }
     loina_device d;
     loina_device_probe(e->directory,&d,NULL);
     if (!e->config.device.ram_bytes) e->config.device.ram_bytes=d.ram_bytes;
@@ -130,7 +131,7 @@ loina_status loina_preload(loina_engine *e, loina_feature feature, loina_job *jo
     return status;
 }
 loina_request loina_request_default(loina_feature feature) {
-    return (loina_request){.feature=feature,.max_tokens=512,.temperature=0.2f,
+    return (loina_request){.feature=feature,.max_tokens=512,.temperature=0.1f,
         .top_p=1.0f,.min_p=0.0f,.seed=UINT32_MAX,.width=1024,.height=1024,.steps=2,.thinking=true,.strength=0.75f};
 }
 loina_job *loina_job_create(loina_engine *e, const loina_request *r, loina_event_fn event, void *user, loina_error *error) {

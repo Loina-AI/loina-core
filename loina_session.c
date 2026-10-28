@@ -30,6 +30,7 @@ void loina_session_free(loina_session *s) {
     loina_session_truncate(s,0);free(s->messages);free(s);
 }
 const char *loina_session_id(const loina_session *s) { return s ? s->id : ""; }
+void loina_session_set_temporary(loina_session *s, bool temporary) { if (s) s->temporary=temporary; }
 size_t loina_session_count(const loina_session *s) { return s ? s->count : 0; }
 loina_message loina_session_get(const loina_session *s, size_t i) {
     return s && i<s->count ? s->messages[i] : (loina_message){0};
@@ -59,6 +60,7 @@ static bool get32(FILE *f, uint32_t *x) {
 }
 loina_status loina_session_save(loina_session *s, loina_error *error) {
     if (!s) return loina_fail(error,LOINA_INVALID,"Missing session");
+    if (s->temporary) return LOINA_OK;
     char path[LOINA_PATH],temp[LOINA_PATH];
     if (!session_path(s->engine,s->id,path) || snprintf(temp,sizeof(temp),"%s.tmp",path)>=(int)sizeof(temp))
         return loina_fail(error,LOINA_INVALID,"Session path is too long");

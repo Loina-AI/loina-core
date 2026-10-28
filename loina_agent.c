@@ -1848,7 +1848,7 @@ int main(int argc, char **argv) {
     agent_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.thinking = true;
-    cfg.temp = 0.2f;
+    cfg.temp = 0.1f;
     cfg.top_p = 1.0f;
     const char *cache_dir = ".loina";
     const char *templates_override = NULL;

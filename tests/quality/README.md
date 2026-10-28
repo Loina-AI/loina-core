@@ -13,7 +13,7 @@ product-specific features and long policies are not part of Loina's prompt.
 Use [MT-Bench-X](https://github.com/Modalities/MT-Bench-X) for open-ended,
 two-turn conversation quality in English, Italian, French, German and Spanish.
 All five are among the default LFM model's
-[16 supported languages](https://huggingface.co/LiquidAI/LFM2.5-VL-3B).
+[16 supported languages](https://huggingface.co/LiquidAI/LFM3-VL-2B).
 Use the original benchmark's judge protocol or blinded human review for quality
 scores. A small slice is a regression check, not an official benchmark result.
 Its Apache-2.0 data uses `question_id`, `category`, `turns` and `reference` fields;
@@ -39,15 +39,25 @@ the energy price change is distinguished from household bills. Mechanical
 keyword checks alone cannot verify these distinctions. The system prompt gets
 the device date, weekday and UTC offset on every model render.
 
+`conversation.jsonl` adds multi-turn coverage, implicit current-information
+requests, short follow-ups, quoted English, explicit language changes and failed
+searches. Its web evidence is fictional and dated 2026-10-21; record the device
+date when replaying it. Review language after English tool results, distinct
+topics in an overview, requested item counts, and preservation of qualifications
+in follow-ups. These checks apply to any installed chat model. Tool permission
+does not mean every follow-up should browse: `checks.web` sets an expected call
+and `turn_checks` overrides rules for individual turns.
+
 Build with the same runtime as the app:
 
 ```sh
 make BUILD=build-eval CMAKE_FLAGS=-DLOINA_EVAL=ON
 python3 tools/quality.py prepare tests/quality/web.jsonl /tmp/loina-quality-cases
 ./build-eval/loina-quality .loina ./build-eval/runtimes/llama/bin ./templates \
-  lfm2-5-vl-3b-q4_k_m-c815851c1e0a1361 /tmp/loina-quality-cases/plan.tsv > answers.jsonl
+  lfm3-vl-2b-qad-q4_0-b5bfc258b7d7cd35 /tmp/loina-quality-cases/plan.tsv > answers.jsonl
 python3 tools/quality.py score tests/quality/web.jsonl answers.jsonl
 python3 tools/quality.py compare before.jsonl after.jsonl comparison.html
+python3 tools/quality.py judge suite.jsonl before.jsonl after.jsonl judge.json
 ```
 
 The model must be installed or staged in its package's `.partial` directory;
@@ -84,6 +94,12 @@ or a supported interpretation. Review the saved answers and tool evidence for:
 
 For subjective comparison, hide variant names and swap answer order before
 review. Report wins, ties and losses with reasons instead of manufacturing an
-overall benchmark score. Run the Android `webAnswers` instrumentation separately
+overall benchmark score. `judge` prepares complete conversation histories,
+references, evidence and a five-dimension rubric with shuffled A/B labels.
+Keep its `.key.json` file out of the judge's input. Save the judge's identity,
+per-pair scores and reasons before unblinding. The tool does not call an API or
+grade its own answers. If the same agent develops and judges a change, disclose
+that limitation; a label-blinded development review is not an independent or
+official MT-Bench-X evaluation. Run the Android `webAnswers` instrumentation separately
 for live search and `browserExtraction` for deterministic WebView extraction.
 Live news changes between runs and must not be used as the only A/B evidence.

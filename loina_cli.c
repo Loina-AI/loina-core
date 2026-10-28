@@ -692,7 +692,7 @@ static void help(void) {
          "  -n N                  Maximum generated tokens (default 2048 thinking, 1024 plain)\n"
          "  --threads N           CPU threads\n"
          "  --backend NAME        CPU, Vulkan, OpenCL, Metal or CUDA\n"
-         "  --temp F              Temperature; zero selects greedy output (default 0.2)\n"
+         "  --temp F              Temperature; zero selects greedy output (default 0.1)\n"
          "  --thinking on|off     Enable reasoning when the package allows it (default on)\n"
          "  --tools on|off        Enable web tools for text/vision (default on, like the app)\n"
          "  --top-p F --min-p F   Sampling filters\n"

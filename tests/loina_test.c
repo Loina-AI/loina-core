@@ -5,7 +5,7 @@
 
 #define check(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while (0)
 static int loaded,unloaded,restored,reset_count,web_calls,tool_chat,tool_step;
-static bool thinking_live;
+static bool thinking_live, migrating;
 static bool thinking_requested;
 static unsigned backends(void) { return LOINA_CPU|LOINA_VULKAN|LOINA_OPENCL; }
 static void *load(loina_engine *e, const loina_package *p, loina_job *j, loina_error *error) {
@@ -15,6 +15,11 @@ static void unload(void *p) { unloaded++;free(p); }
 static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, loina_error *error) {
     (void)p;(void)error;
     thinking_requested=j->request.thinking;
+    if (migrating) {
+        check(s->first==0 && s->count==3);
+        check(!strcmp(s->messages[0].text,"Remember the codeword: turquoise."));
+        check(!strcmp(s->messages[1].text,"I will remember turquoise."));
+    }
     if (tool_chat) {
         const loina_message *last=&s->messages[s->count-1];
         static const char *search="<function name=\"web_search\"><param name=\"query\">test</param></function>";
@@ -109,23 +114,9 @@ int main(int argc, char **argv) {
         const loina_package *model=loina_catalog_get(i);
         if (model->feature==LOINA_TEXT) { text_packages++;check(model->chat_template); }
     }
-    check(text_packages==3);
-    check(!strcmp(loina_resolve(e,LOINA_TEXT,&error)->chat_template,"lfm2.5-vl-3b.jinja"));
-    check(!loina_resolve(e,LOINA_TEXT,&error)->thinking);
-    const loina_package *optional=loina_catalog_find("minicpm-v-4_7-1b-q8_0-b2ad48e4359d73b9");
-    char optional_dir[LOINA_PATH],optional_path[LOINA_PATH],optional_hash[65];
-    check(optional && loina_path(optional_dir,e->directory,"packages",optional->id) && loina_mkdir(optional_dir));
-    check(loina_artifact_path(e,optional,0,optional_path));
-    /* Sparse weights exercise installed-package selection without a download. */
-    FILE *weights=fopen(optional_path,"wb");check(weights);
-    check(!fseek(weights,(long)optional->files[0].bytes-1,SEEK_SET) && fputc(0,weights)!=EOF && !fclose(weights));
-    loina_package_identity(optional,optional_hash);
-    check(loina_path(optional_path,optional_dir,"ready",NULL));write_file(optional_path,optional_hash,64);
-    check(loina_resolve(e,LOINA_TEXT,&error)==optional);
-    e->config.device.ram_bytes=e->config.device.available_ram_bytes=1000;
-    check(loina_package_compatible(e,optional) && loina_resolve(e,LOINA_TEXT,&error)==optional);
-    check(loina_uninstall(e,optional,&error)==LOINA_OK);
-    e->config.device.ram_bytes=16000000000;e->config.device.available_ram_bytes=10000000000;
+    check(text_packages==1);
+    check(!strcmp(loina_resolve(e,LOINA_TEXT,&error)->chat_template,"lfm3-vl-2b.jinja"));
+    check(loina_resolve(e,LOINA_TEXT,&error)->thinking);
     loina_request image=loina_request_default(LOINA_IMAGE);
     check(image.width==1024 && image.height==1024 && image.steps==2);
     image.prompt="A red fox";image.output_path="fox.png";
@@ -186,7 +177,7 @@ int main(int argc, char **argv) {
     check(!loina_chat_compact(s,NULL));
     loina_session_truncate(s,0);s->first=0;
     loina_request request=loina_request_default(LOINA_TEXT);
-    check(request.temperature==0.2f && request.top_p==1.0f && request.min_p==0.0f && request.thinking);
+    check(request.temperature==0.1f && request.top_p==1.0f && request.min_p==0.0f && request.thinking);
     request.package=&p;request.session=s;request.prompt="hello";
     loina_job *j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
     check(loina_job_run(j,&error)==LOINA_OK);check(!strcmp(loina_job_result(j),"fixture"));
@@ -328,8 +319,45 @@ int main(int argc, char **argv) {
     check(loina_session_save(s,&error)==LOINA_OK);
     again=loina_session_load(e,"regression",&error);check(again && again->count==s->count);
     check(again->messages[again->count-4].role==LOINA_TOOL_RESULT);loina_session_free(again);
+    loina_session *old=loina_session_create(e,"old-chat",&error);check(old);
+    check(loina_session_add(old,LOINA_USER,LOINA_MESSAGE_TEXT,"Remember the codeword: turquoise."));
+    check(loina_session_add(old,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"I will remember turquoise."));
+    const char *retired_id="lfm2-5-vl-3b-q4_k_m-c815851c1e0a1361";
+    strcpy(old->package_id,retired_id);old->first=2;
+    check(loina_session_save(old,&error)==LOINA_OK);loina_session_free(old);
+    old=loina_session_load(e,"old-chat",&error);check(old);
+    request.session=old;request.package=&p;request.tools=false;request.prompt="What is my codeword?";
+    migrating=true;
+    j=loina_job_create(e,&request,cancel_event,&j,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_CANCELLED);loina_job_free(j);
+    check(old->count==2 && old->first==2 && !strcmp(old->package_id,retired_id));
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK);loina_job_free(j);migrating=false;
+    check(old->count==4 && old->first==0 && !strcmp(old->package_id,p.id));
+    loina_session_free(old);old=loina_session_load(e,"old-chat",&error);
+    check(old && old->count==4 && old->first==0 && !strcmp(old->package_id,p.id));loina_session_free(old);
+    check(loina_session_delete(e,"old-chat",&error)==LOINA_OK);
+    char retired_dir[LOINA_PATH];check(loina_path(retired_dir,e->directory,"packages",retired_id) && loina_mkdir(retired_dir));
+    check(loina_path(path,retired_dir,"LFM2.5-VL-3B-Q4_K_M.gguf",NULL));write_file(path,"old",3);
+    check(loina_path(path,retired_dir,"ready",NULL));write_file(path,"old",3);
+    check(loina_packages_upgrade(e,&error)==LOINA_OK);
+    check(loina_file_bytes(path)==UINT64_MAX && loina_package_installed(e,&p));
     check(!loina_session_load(e,"../escape",&error));
     int sessions=0;check(!loina_session_list(e,count_session,&sessions,&error));check(sessions>=1);
+    loina_session *ephemeral=loina_session_create(e,"temporary-test",&error);check(ephemeral);
+    loina_session_set_temporary(ephemeral,true);
+    request.session=ephemeral;request.prompt="Keep this conversation in memory";
+    for (int turn=0;turn<2;turn++) {
+        j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+        check(loina_job_run(j,&error)==LOINA_OK);loina_job_free(j);
+        check(loina_session_count(ephemeral)==(size_t)(turn+1)*2);
+        check(!loina_session_load(e,"temporary-test",NULL));
+        int listed=0;check(!loina_session_list(e,count_session,&listed,&error));check(listed==sessions);
+        check(loina_cache_restore(e,ephemeral));
+    }
+    e->cache_session[0]=e->cache_transcript[0]=0;
+    check(!loina_cache_restore(e,ephemeral));
+    loina_session_free(ephemeral);
     check(loina_path(path,argv[1],"outputs","sample.png"));
     unsigned char pixels[12]={255,0,0,0,255,0,0,0,255,255,255,255};
     check(!loina_png(path,pixels,2,2,3,&error));check(loina_file_bytes(path)>50);

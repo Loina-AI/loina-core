@@ -34,6 +34,7 @@ struct loina_engine {
 };
 struct loina_session {
     loina_engine *engine;
+    bool temporary;
     char id[128];
     char package_id[256];
     loina_message *messages;
@@ -70,6 +71,7 @@ void loina_sha_final(loina_sha *, char hex[65]);
 loina_status loina_hash_file(const char *, char hex[65], loina_job *, loina_error *);
 bool loina_package_valid(const loina_package *);
 void loina_package_identity(const loina_package *, char hex[65]);
+loina_status loina_packages_upgrade(loina_engine *, loina_error *);
 const loina_runtime *loina_runtime_find(const char *);
 unsigned loina_runtime_backends(void);
 loina_status loina_activate(loina_engine *, const loina_package *, loina_job *, loina_error *);

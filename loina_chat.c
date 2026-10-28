@@ -251,7 +251,13 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
     if (r->package && r->package->feature==feature) p=r->package;
     else if (s->package_id[0]) p=loina_catalog_find(s->package_id);
     else p=loina_resolve(e,feature,error);
-    if (!p) { status=loina_fail(error,LOINA_INCOMPATIBLE,"The original chat package is unavailable; start a new conversation to change models");goto done; }
+    if (!p) p=loina_resolve(e,feature,error);
+    if (!p) { status=loina_fail(error,LOINA_INCOMPATIBLE,"No compatible chat package is available");goto done; }
+    if (s->package_id[0] && strcmp(s->package_id,p->id) && !loina_catalog_find(s->package_id)) {
+        /* Retired weights cannot share KV. Replay the saved transcript with
+         * the current model; ordinary context compaction still applies. */
+        strcpy(s->package_id,p->id);s->first=0;
+    }
     if (p->feature!=feature || (s->package_id[0] && strcmp(s->package_id,p->id))) {
         status=loina_fail(error,LOINA_INCOMPATIBLE,"Conversation belongs to another immutable package");goto done;
     }

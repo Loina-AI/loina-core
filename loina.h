@@ -125,6 +125,8 @@ loina_status loina_uninstall(loina_engine *engine, const loina_package *package,
 loina_session *loina_session_create(loina_engine *engine, const char *id, loina_error *error);
 loina_session *loina_session_load(loina_engine *engine, const char *id, loina_error *error);
 void loina_session_free(loina_session *session);
+/* Temporary sessions keep their transcript and KV state in memory only. */
+void loina_session_set_temporary(loina_session *session, bool temporary);
 const char *loina_session_id(const loina_session *session);
 size_t loina_session_count(const loina_session *session);
 loina_message loina_session_get(const loina_session *session, size_t index);
