@@ -114,6 +114,9 @@ another package; the reused bytes are hashed again before installation.
 Parakeet uses the [cstr GGUF conversion](https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF).
 The C container adapter preserves mixed quantization and translates the LSTM
 gate order and biases for the existing Parakeet decoder.
+Speech follows the configured CUDA, Metal, or Vulkan device. OpenCL speech
+currently falls back to CPU because its Parakeet path can produce empty text
+or fail during model loading.
 
 An embedding application provides the download callback. The reference CLI
 imports files already present on disk. For a package containing several files,

@@ -2,6 +2,7 @@
 #include "parakeet.h"
 #include "ggml.h"
 #include "gguf.h"
+#include "ggml-backend.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -265,15 +266,32 @@ static int speech_type(void *pointer, const char *name) {
     for (size_t i=0;i<r->count;i++) if (!strcmp(r->tensors[i].name,name)) return r->tensors[i].type;
     return -1;
 }
-struct parakeet_context *loina_parakeet_load(const char *path, bool gpu, loina_job *job) {
+static struct parakeet_context_params speech_settings(unsigned backends) {
+    struct parakeet_context_params settings=parakeet_context_default_params();
+    settings.use_gpu=false;
+    int gpu=0;
+    for (size_t i=0;i<ggml_backend_dev_count();i++) {
+        ggml_backend_dev_t device=ggml_backend_dev_get(i);
+        enum ggml_backend_dev_type type=ggml_backend_dev_type(device);
+        if (type!=GGML_BACKEND_DEVICE_TYPE_GPU && type!=GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
+        const char *name=ggml_backend_reg_name(ggml_backend_dev_backend_reg(device));
+        /* Parakeet's OpenCL path can return only blank tokens or crash before
+         * backend initialization. Keep dictation on a supported GPU or CPU. */
+        unsigned bit=strstr(name,"CUDA") ? LOINA_CUDA : strstr(name,"Metal") ? LOINA_METAL :
+            strstr(name,"Vulkan") ? LOINA_VULKAN : 0;
+        if (bit & backends) { settings.use_gpu=true;settings.gpu_device=gpu;break; }
+        gpu++;
+    }
+    return settings;
+}
+struct parakeet_context *loina_parakeet_load(const char *path, unsigned backends, loina_job *job) {
     speech_reader *r=calloc(1,sizeof(*r));
     if (!r) return NULL;
     r->job=job;r->file=fopen(path,"rb");
     uint32_t magic=0;
     if (r->file && fread(&magic,sizeof(magic),1,r->file)==1 && magic==GGML_FILE_MAGIC) {
         fclose(r->file);free(r);
-        struct parakeet_context_params settings=parakeet_context_default_params();
-        settings.use_gpu=gpu;
+        struct parakeet_context_params settings=speech_settings(backends);
         return parakeet_init_from_file_with_params(path,settings);
     }
     if (r->file) rewind(r->file);
@@ -283,8 +301,7 @@ struct parakeet_context *loina_parakeet_load(const char *path, bool gpu, loina_j
     if (r->gguf && prepare(r)) {
         struct parakeet_model_loader loader={.context=r,.read=speech_read,.eof=speech_eof,
             .close=speech_close,.tensor_type=speech_type};
-        struct parakeet_context_params settings=parakeet_context_default_params();
-        settings.use_gpu=gpu;
+        struct parakeet_context_params settings=speech_settings(backends);
         ctx=parakeet_init_with_params(&loader,settings);
         if (r->failed && ctx) { parakeet_free(ctx);ctx=NULL; }
     }

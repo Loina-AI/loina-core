@@ -16,8 +16,7 @@ static unsigned speech_backends(void) {
 static void *speech_load(loina_engine *e, const loina_package *p, loina_job *job, loina_error *error) {
     char path[LOINA_PATH];
     if (!loina_artifact_path(e,p,0,path)) { loina_fail(error,LOINA_INVALID,"Invalid speech package path");return NULL; }
-    bool gpu=(speech_backends() & e->config.device.backends & (LOINA_OPENCL|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA))!=0;
-    struct parakeet_context *ctx=loina_parakeet_load(path,gpu,job);
+    struct parakeet_context *ctx=loina_parakeet_load(path,speech_backends() & e->config.device.backends,job);
     if (!ctx) loina_fail(error,LOINA_RUNTIME_ERROR,"Cannot initialize Parakeet speech package");
     return ctx;
 }

@@ -96,7 +96,7 @@ extern const loina_runtime loina_diffusion;
 #endif
 #ifdef LOINA_WITH_SPEECH
 extern const loina_runtime loina_speech;
-struct parakeet_context *loina_parakeet_load(const char *, bool, loina_job *);
+struct parakeet_context *loina_parakeet_load(const char *, unsigned, loina_job *);
 #endif
 #ifdef LOINA_TEST
 extern const loina_runtime loina_test_runtime;
