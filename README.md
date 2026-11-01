@@ -118,8 +118,8 @@ Speech follows the configured CUDA, Metal, or Vulkan device. OpenCL speech
 currently falls back to CPU because its Parakeet path can produce empty text
 or fail during model loading.
 
-An embedding application provides the download callback. The reference CLI
-imports files already present on disk. For a package containing several files,
+An embedding application provides the download callback. The reference CLI provides a curl download bridge and can also import files
+already present on disk. For a package containing several files,
 put all of its artifacts in the same directory before importing it.
 
 Sana Sprint uses 1024×1024 images and two SCM steps by default, with distilled
@@ -149,11 +149,18 @@ make          # produces ./loina and ./loina-agent next to the sources
 ./loina --device
 ```
 
-With the catalog's chat GGUF on disk, ask a question:
+Download the chat model into `gguf/`, then ask a question:
 
 ```sh
-./loina -m ../models/LFM3-VL-2B-QAD-Q4_0.gguf -p "Explain radix trees."
+./download_model.sh                 # chat model
+./download_model.sh vision          # shared chat weights and vision projector
+./loina -p "Explain radix trees."
 ```
+
+`download_model.sh` also accepts `speech`, `image`, `all`, or a package ID.
+Downloads resume after interruption and are size/SHA-256 checked before use.
+To reuse existing files, run `./download_model.sh all --import ../models`.
+The script uses the built `./loina` installer and requires curl for downloads.
 
 `./loina` uses the same settings as the apps: web tools on for text/vision,
 2048 tokens with thinking (1024 plain), the immutable catalog resolver over
@@ -167,8 +174,13 @@ runtime. An unavailable backend returns an error instead of changing the choice.
 
 The first use of `-m` imports the package from the file's directory and verifies
 its artifacts. An installed package can also be selected with `--package ID`.
-Omit `-p` to start an interactive conversation. The default store is `.loina`;
-use `--cache-dir PATH` to choose another location.
+Omit `-p` to start an interactive conversation. Both terminal programs use
+`gguf/` beside their executable for model files and `~/.loina/kvcache` for
+saved conversations and KV. `--model-dir PATH` (or `LOINA_GGUF_DIR`) selects
+another model folder; `--cache-dir PATH` selects another session/KV folder.
+Chat and vision share one weights file in `gguf/`. Verification markers live
+in `gguf/.loina/`. KV snapshots are grouped by runtime compatibility inside
+`kvcache/`; the `.chat` files beside those groups retain the full transcript.
 
 The interactive commands are:
 
@@ -189,6 +201,20 @@ Ctrl+C interrupts generation. `--session ID` resumes a conversation at startup.
 Run `./loina --help` for context, sampling, image generation, and WAV
 transcription options.
 
+Both interactive programs use the same terminal frontend and the linenoise
+editor from ds4. The screen is filled before the welcome banner is drawn;
+output scrolls above the bottom prompt and status row. The model loads before
+input becomes available. Thinking is gray, and the status row shows context,
+prefill progress, and generation speed. Both modes share ds4’s Markdown and
+syntax renderer; agent tool names, parameters, and source code stream as they
+are generated.
+
+History navigation, UTF-8 editing, multiline paste, and resizing work in both
+modes. Enter queues a prompt during generation, Ctrl+X edits the first queued
+prompt, and Escape interrupts the current turn to send queued input. An
+unfinished draft survives the end of a turn. Tab toggles thinking at an empty
+idle prompt, and Ctrl+D exits. `/history [N]` displays recent user turns.
+
 ## Use the agent
 
 `./loina-agent` is a ds4-style coding agent on the same core and runtime,
@@ -200,13 +226,41 @@ inspired by `ds4_agent.c` and `q36_agent.c` but translated to loina commands
 ./loina-agent --chdir ~/src/proj   # interactive REPL
 ```
 
+Without `--chdir`, each agent launch gets a fresh `/tmp/loina-agent-*`
+workspace. Generated files remain there after exit. Explicit model, cache, import, template, and prompt-file paths are resolved
+relative to the launch directory before switching workspaces.
+
+Ctrl+D, `/quit`, and `/exit` ask `Save current session? (y/n)` when there
+are unsaved turns. Answering `y` saves both the conversation and its KV
+checkpoint in the cache directory and prints the session ID. Answering `n`
+discards unsaved changes; an earlier explicit save remains intact. `/save`
+writes the same checkpoint without exiting. Empty or already saved sessions
+exit without asking.
+
+Resume with `./loina-agent --session ID`. Add `--chdir` with the previous
+workspace path to continue working on the same files.
+
 The agent keeps the CLI session store, thinking flag, and vision layer, and
-adds local tools through a `<loina_tool_calls>` protocol (kept distinct from
-the core web markers so the core streams them as plain text for the agent to
-dispatch): `read`, `more`, `write`, `edit`, `search`, `list`, `bash`,
-`view_image`, `web_search`, `web_visit`. Use `--edit-upto` for anchored
+adds typed native function tools, dispatched by the agent rather than the
+app's web loop: `read`, `more`, `write`, `edit`, `search`, `list`, `bash`,
+`bash_status`, `bash_stop`, `view_image`, `google_search`, `visit_page`.
+Tool descriptions, parameters, and native call instructions come from ds4.
+The web tools use Loina’s curl bridge. Use `--edit-upto` for anchored
 `[upto]` edits, `--vision FILE` to attach an image to the first task, and
 `/read FILE` inside the REPL for documents or images.
+
+Native LFM calls use `<tool_call><function=...><parameter=...>` and tool
+results are retained as tool messages. The agent also accepts its older
+`<loina_tool_calls>` format. Default generation budgets are 8192 tokens with
+thinking and 4096 without; `-n` overrides them.
+
+After a write or edit, the agent requires a successful shell check before
+reporting completion. Shell output appears in the terminal; exit status is
+returned to the model.
+Bash uses ds4’s 3600 second timeout and 60 second refresh defaults, with
+background jobs available through `refresh_sec`, `bash_status`, and `bash_stop`.
+Failed checks prompt another repair attempt; an exhausted tool
+budget reports failure rather than an unverified success.
 
 ## Embed the library
 
@@ -253,6 +307,13 @@ These tests use a controlled fake runtime. They exercise packages, sessions,
 jobs, caching, and tool handling. Model quality and device performance need
 separate checks with real weights and hardware.
 
+The shared terminal has model-free pseudo-terminal regressions using only
+Python's standard library and the C compiler:
+
+```sh
+python3 tests/test_terminal.py
+```
+
 To run only these checks without building the inference runtimes:
 
 ```sh
@@ -294,6 +355,8 @@ that make local inference possible.
 Thanks also to Salvatore Sanfilippo's [DwarfStar](https://github.com/antirez/ds4)
 and Ninnix's [QuarkStar](https://github.com/Ninnix/q36) for their work on local
 inference and for making the implementation and its tradeoffs open to study.
+The terminal editor, renderer, native tool descriptions and file contracts
+include ds4 code under its [MIT license](licenses/ds4.txt).
 
 Loina's code is distributed under the [MIT license](LICENSE). Runtime source
 code and model weights retain their own licenses; model licenses are recorded

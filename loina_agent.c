@@ -1,8 +1,20 @@
 #include "loina.h"
+#include "loina_terminal.h"
+#include "loina_renderer.h"
+#include "loina_bash.h"
+#include "loina_storage.h"
+#include "loina_agent_tools.h"
+#include "ds4_tool_text.h"
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fnmatch.h>
+#include <fcntl.h>
+#ifdef __linux__
+#include <sys/xattr.h>
+#elif defined(__APPLE__)
+#include <copyfile.h>
+#endif
 #include <limits.h>
 #include <regex.h>
 #include <signal.h>
@@ -16,26 +28,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* loina-agent, ds4 style.
- *
- * A coding agent on top of loina-core (llama.cpp runtime) using loina
- * commands: loina_open / loina_job_create / loina_job_run with the same
- * immutable catalog packages as the app. Interactive REPL mirrors ./loina
- * (sessions, /read vision, thinking) plus agent tools.
- *
- * Tool protocol (ASCII, intentionally distinct from the core web-tool markers
- * so loina_chat streams them as plain text for the agent to dispatch):
- *
- *   <loina_tool_calls>
- *   <loina_invoke name="read">
- *   <loina_param name="path">src/main.c</loina_param>
- *   </loina_invoke>
- *   </loina_tool_calls>
- *
- * Tool calls are never inside <think>. The agent executes them locally
- * (read/more/write/edit/search/list/bash/view_image/web_search/web_visit),
- * feeds observations back as <tool_response> user turns, and loops until the
- * model answers without tools. Inspired by ds4_agent.c and q36_agent.c. */
+/* Host tools use the model's native protocol; the core keeps app tools separate. */
 
 static volatile sig_atomic_t g_interrupted;
 static loina_job *volatile g_job;
@@ -128,50 +121,35 @@ static const char *need_arg(int *i, int argc, char **argv, const char *opt) {
     return argv[++(*i)];
 }
 
-/* ---------- streaming renderer (thinking grey + tool hiding) ---------- */
+/* ---------- streaming reasoning and native tool visualization ---------- */
 
 typedef struct {
     loina_job *job;
-    char *buf;
-    size_t len, cap;
     bool use_color;
+    unsigned context;
     bool in_think;
-    bool color_open;
     bool last_nl;
     bool in_tool;
+    bool native_tool;
+    char tool_tag[256], tool_name[64], tool_param[64];
+    loina_renderer *renderer;
+    size_t tool_tag_len;
+    bool tool_value, tool_first, tool_newline;
+    int streamed_tools;
     char pending[32];
     size_t pending_len;
     double prefill, decode;
     bool have_metrics;
 } stream_t;
 
-static void s_grey(stream_t *s) {
-    if (s->use_color && !s->color_open) {
-        fputs("\x1b[90m", stdout);
-        s->color_open = true;
-    }
-}
 
-static void s_reset(stream_t *s) {
-    if (s->use_color && s->color_open) {
-        fputs("\x1b[0m", stdout);
-        s->color_open = false;
-    }
-}
 
-static void s_emit(stream_t *s, const char *p, size_t n) {
-    if (n > 16 * 1024 * 1024)
-        return;
-    if (s->len + n + 1 > s->cap) {
-        size_t nc = s->cap ? s->cap * 2 : 8192;
-        while (nc < s->len + n + 1)
-            nc *= 2;
-        s->buf = xrealloc(s->buf, nc);
-        s->cap = nc;
+static loina_renderer *s_renderer(stream_t *s) {
+    if (!s->renderer) {
+        s->renderer = loina_renderer_new(s->use_color);
+        loina_renderer_context(s->renderer, s->context);
     }
-    memcpy(s->buf + s->len, p, n);
-    s->len += n;
-    s->buf[s->len] = 0;
+    return s->renderer;
 }
 
 static bool starts(const char *p, size_t n, const char *s) {
@@ -182,6 +160,77 @@ static bool starts(const char *p, size_t n, const char *s) {
 static bool partial(const char *p, size_t n, const char *s) {
     size_t m = strlen(s);
     return n < m && !memcmp(s, p, n);
+}
+
+static void tool_stream_char(stream_t *s, char c) {
+    loina_renderer_param_byte(s_renderer(s), c);
+    s->last_nl = loina_renderer_last_nl(s->renderer);
+}
+
+static void tool_stream_value(stream_t *s, char c) {
+    if (!s->tool_value) return;
+    if (s->tool_first) {
+        s->tool_first = false;
+        if (c == '\n') return;
+    }
+    /* Hold just the delimiter newline; embedded blank lines still stream. */
+    if (s->tool_newline) tool_stream_char(s, '\n');
+    s->tool_newline = c == '\n';
+    if (c != '\n') tool_stream_char(s, c);
+}
+
+static void tool_stream_end(stream_t *s) {
+    s->tool_value = s->tool_newline = false;
+    loina_renderer_tool_end(s_renderer(s));
+    s->last_nl = loina_renderer_last_nl(s->renderer);
+    s->tool_name[0] = s->tool_param[0] = 0;
+}
+
+static void tool_stream_tag(stream_t *s) {
+    char *tag = s->tool_tag;
+    if (!strncmp(tag, "<function=", 10)) {
+        size_t n = strlen(tag) - 11;
+        snprintf(s->tool_name, sizeof(s->tool_name), "%.*s", (int)n, tag + 10);
+        loina_renderer_tool_start(s_renderer(s));
+        loina_renderer_tool_name(s->renderer, s->tool_name);
+        s->streamed_tools++;
+    } else if (!strncmp(tag, "<parameter=", 11)) {
+        size_t n = strlen(tag) - 12;
+        snprintf(s->tool_param, sizeof(s->tool_param), "%.*s", (int)n, tag + 11);
+        s->tool_value = s->tool_first = true;
+        s->tool_newline = false;
+        loina_renderer_param_start(s_renderer(s), s->tool_param);
+    } else if (!strcmp(tag, "</parameter>")) {
+        s->tool_value = s->tool_newline = false;
+        loina_renderer_param_end(s_renderer(s));
+    } else if (!strcmp(tag, "</function>")) tool_stream_end(s);
+    s->last_nl = loina_renderer_last_nl(s_renderer(s));
+}
+
+static void tool_stream_byte(stream_t *s, char c) {
+    if (s->in_think) return;
+    if (!s->tool_tag_len && c != '<') { tool_stream_value(s, c); return; }
+    if (s->tool_tag_len + 1 >= sizeof(s->tool_tag)) {
+        for (size_t i = 0; i < s->tool_tag_len; i++) tool_stream_value(s, s->tool_tag[i]);
+        s->tool_tag_len = 0;
+    }
+    s->tool_tag[s->tool_tag_len++] = c;
+    s->tool_tag[s->tool_tag_len] = 0;
+    const char *tags[] = {"<function=", "</function>", "<parameter=", "</parameter>"};
+    bool possible = false;
+    for (size_t i = 0; i < sizeof(tags)/sizeof(*tags); i++) {
+        if (s->tool_value && i != 3) continue;
+        size_t len = strlen(tags[i]);
+        if (!strncmp(s->tool_tag, tags[i], s->tool_tag_len < len ? s->tool_tag_len : len))
+            possible = true;
+    }
+    if (!possible) {
+        for (size_t i = 0; i < s->tool_tag_len; i++) tool_stream_value(s, s->tool_tag[i]);
+        s->tool_tag_len = 0;
+    } else if (c == '>') {
+        tool_stream_tag(s);
+        s->tool_tag_len = 0;
+    }
 }
 
 static void s_write(stream_t *s, const char *text, size_t n, bool finish) {
@@ -200,61 +249,79 @@ static void s_write(stream_t *s, const char *text, size_t n, bool finish) {
         size_t rem = total - i;
         if (!s->in_tool && starts(cur, rem, tool_open)) {
             s->in_tool = true;
+            loina_terminal_event(LOINA_TOOL, "preparing tool call", 0);
             i += strlen(tool_open);
             continue;
         }
-        if (s->in_tool && starts(cur, rem, tool_close)) {
-            s->in_tool = false;
-            i += strlen(tool_close);
+        if (!s->in_tool && starts(cur, rem, "<tool_call>")) {
+            s->in_tool = s->native_tool = true;
+            s->tool_tag_len = 0;
+            loina_terminal_event(LOINA_TOOL, "preparing tool call", 0);
+            i += strlen("<tool_call>");
             continue;
         }
+        if (s->in_tool && (!s->native_tool || !s->tool_value) && starts(cur, rem, s->native_tool ? "</tool_call>" : tool_close)) {
+            if (s->native_tool && *s->tool_name) tool_stream_end(s);
+            s->in_tool = false;
+            i += strlen(s->native_tool ? "</tool_call>" : tool_close);
+            s->native_tool = false;
+            continue;
+        }
+        if (s->in_tool && !finish && cur[0] == '<' &&
+            partial(cur, rem, s->native_tool ? "</tool_call>" : tool_close)) {
+            memcpy(s->pending, cur, rem); s->pending_len = rem;
+            break;
+        }
         if (s->in_tool) {
+            if (s->native_tool) tool_stream_byte(s, cur[0]);
             i++;
-            continue; /* hide tool XML; announced after the turn */
+            continue;
         }
         if (starts(cur, rem, "<think>")) {
             s->in_think = true;
+            loina_renderer_feed(s_renderer(s), "<think>", 7);
             i += 7;
             continue;
         }
         if (starts(cur, rem, "</think>")) {
             s->in_think = false;
-            s_reset(s);
-            if (!s->last_nl) {
-                fputc('\n', stdout);
-                s->last_nl = true;
-            }
+            loina_renderer_feed(s_renderer(s), "</think>", 8);
+            s->last_nl = loina_renderer_last_nl(s->renderer);
             i += 8;
             continue;
         }
         if (!finish && cur[0] == '<' &&
             (partial(cur, rem, "<think>") || partial(cur, rem, "</think>") ||
-                partial(cur, rem, tool_open) || partial(cur, rem, tool_close))) {
+                partial(cur, rem, tool_open) || partial(cur, rem, tool_close) ||
+                partial(cur, rem, "<tool_call>") || partial(cur, rem, "</tool_call>"))) {
             if (rem < sizeof(s->pending)) {
                 memcpy(s->pending, cur, rem);
                 s->pending_len = rem;
             }
             break;
         }
-        s_emit(s, cur, 1);
-        if (s->in_think)
-            s_grey(s);
-        fputc((unsigned char)cur[0], stdout);
-        s->last_nl = (cur[0] == '\n');
+        loina_renderer_feed(s_renderer(s), cur, 1);
+        s->last_nl = loina_renderer_last_nl(s->renderer);
         i++;
     }
     free(b);
+    if (finish && s->renderer) {
+        loina_renderer_finish(s->renderer);
+        s->last_nl = loina_renderer_last_nl(s->renderer);
+    }
 }
 
 static void stream_event(void *user, loina_event ev, const char *text, size_t n, int progress) {
     stream_t *s = user;
-    (void)progress;
+    if (ev == LOINA_TOKEN && s->in_tool)
+        loina_terminal_event(LOINA_TOOL, "preparing tool call", 0);
+    else loina_terminal_event(ev, text, progress);
     if (g_interrupted && s->job)
         loina_job_cancel(s->job);
     if (ev == LOINA_TOKEN) {
         s_write(s, text, n, false);
         fflush(stdout);
-    } else if (ev == LOINA_LOADING) {
+    } else if (ev == LOINA_LOADING && !loina_terminal_active()) {
         fprintf(stderr, "Loading %.*s\n", (int)n, text);
     } else if (ev == LOINA_TOOL) {
         fprintf(stderr, "Reading the web...\n");
@@ -568,12 +635,14 @@ static loina_status agent_web(void *user, const char *url, char **text, loina_jo
     return LOINA_OK;
 }
 
-/* ---------- local tools (ds4 contracts, loina-sized) ---------- */
+/* Local file contracts adapted from ds4_agent.c (MIT; licenses/ds4.txt). */
 
 typedef struct {
     char more_path[PATH_MAX];
-    int more_next;
-    bool more_valid;
+    long more_next;
+    off_t more_offset;
+    bool more_valid, more_raw, more_mid_line;
+    unsigned context;
 } more_state_t;
 
 static char *tool_err(const char *fmt, const char *a) {
@@ -582,335 +651,391 @@ static char *tool_err(const char *fmt, const char *a) {
     return xstrdup(b);
 }
 
-static bool under_cwd(const char *path, char out[PATH_MAX]) {
+static bool absolute_path(const char *path, char out[PATH_MAX]) {
+    if (!path || !*path) return false;
+    if (*path == '/') return snprintf(out, PATH_MAX, "%s", path) < PATH_MAX;
     char cwd[PATH_MAX];
-    if (!getcwd(cwd, sizeof(cwd)))
-        return false;
-    char tmp[PATH_MAX];
-    if (path[0] == '/') {
-        if (strlen(path) >= sizeof(tmp)) return false;
-        snprintf(tmp, sizeof(tmp), "%s", path);
-    } else {
-        if (strlen(cwd) + 1 + strlen(path) >= sizeof(tmp)) return false;
-        snprintf(tmp, sizeof(tmp), "%s/%s", cwd, path);
+    return getcwd(cwd, sizeof(cwd)) && snprintf(out, PATH_MAX, "%s/%s", cwd, path) < PATH_MAX;
+}
+
+typedef struct {
+    char *ptr;
+    size_t len;
+    size_t cap;
+    size_t limit;
+    bool truncated;
+} agent_buf;
+
+#define AGENT_TOOL_MAX_BYTES (128 * 1024)
+
+static void agent_buf_append(agent_buf *b, const char *s, size_t n) {
+    if (!n || b->truncated) return;
+    const size_t max = b->limit ? b->limit : SIZE_MAX - 1;
+    if (n > max - b->len) {
+        n = max > b->len ? max - b->len : 0;
+        while (n && ((unsigned char)s[n] & 0xc0) == 0x80) n--;
+        b->truncated = true;
     }
-    /* Collapse ./ and trailing /. No symlink resolution (tools follow the
-     * target like ds4; hard-link rejection is best-effort below). */
-    char *w = out;
-    const char *r = tmp;
-    if (*r == '/')
-        *w++ = *r++;
-    while (*r) {
-        while (*r == '/')
-            r++;
-        if (!*r)
-            break;
-        const char *seg = r;
-        while (*r && *r != '/')
-            r++;
-        size_t n = (size_t)(r - seg);
-        if (n == 1 && seg[0] == '.')
-            continue;
-        if (n == 2 && seg[0] == '.' && seg[1] == '.') {
-            /* Refuse to escape the workspace for writes; reads may use
-             * absolute paths like the app document picker. */
-            if (w > out + 1) {
-                w--;
-                while (w > out && *(w - 1) != '/')
-                    w--;
-            }
-            continue;
+    if (!n) return;
+    if (b->len + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap * 2 : 4096;
+        while (cap < b->len + n + 1) cap *= 2;
+        b->ptr = xrealloc(b->ptr, cap);
+        b->cap = cap;
+    }
+    memcpy(b->ptr + b->len, s, n);
+    b->len += n;
+    b->ptr[b->len] = '\0';
+}
+
+static void agent_buf_puts(agent_buf *b, const char *s) {
+    agent_buf_append(b, s, strlen(s));
+}
+
+static char *agent_buf_take(agent_buf *b) {
+    if (b->truncated) {
+        b->truncated = false;
+        b->limit = 0;
+        agent_buf_puts(b, "\n[Output truncated at the tool byte limit. Narrow the request.]\n");
+    }
+    if (!b->ptr) return xstrdup("");
+    char *p = b->ptr;
+    memset(b, 0, sizeof(*b));
+    return p;
+}
+
+static int read_default_lines(const more_state_t *more) {
+    return more->context && more->context <= 8192 ? 120 : more->context && more->context <= 16384 ? 240 : 500;
+}
+
+static FILE *open_regular_file(const char *path) {
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    struct stat st;
+    if (fd < 0) return NULL;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode)) { close(fd); errno=EINVAL; return NULL; }
+    FILE *f = fdopen(fd, "rb");
+    if (!f) close(fd);
+    return f;
+}
+
+static char *tool_read_from(more_state_t *w, const char *path, long start_line,
+                              long max_lines, bool whole_file, bool bare,
+                              bool set_more, off_t offset, bool mid_line) {
+    if (!path || !path[0]) return xstrdup("Tool error: read requires path\n");
+    agent_buf out = {0}, body = {0};
+    FILE *fp = open_regular_file(path);
+    if (!fp) goto failed;
+    struct stat st;
+    if (fstat(fileno(fp), &st) != 0) goto failed;
+    if (!S_ISREG(st.st_mode)) { errno = EINVAL; goto failed; }
+    if (start_line < 1) start_line = 1;
+    if (max_lines <= 0) max_lines = read_default_lines(w);
+    int c; long line = 1, lines = 0;
+    if (offset > 0) {
+        if (fseeko(fp, offset, SEEK_SET) != 0) goto failed;
+        line = start_line;
+    }
+    while (line < start_line && (c = fgetc(fp)) != EOF) {
+        if (c == '\r') {
+            int next = fgetc(fp);
+            if (next != '\n' && next != EOF) ungetc(next, fp);
         }
-        if ((size_t)(w - out) + n + 2 >= PATH_MAX)
-            return false;
-        if (w != out && *(w - 1) != '/')
-            *w++ = '/';
-        memcpy(w, seg, n);
-        w += n;
+        if (c == '\n' || c == '\r') line++;
     }
-    *w = 0;
-    if (!out[0])
-        strcpy(out, "/");
-    return true;
+    bool beginning = !mid_line, prefix = true;
+    long last_line = 0;
+    while ((whole_file || lines < max_lines) && (c = fgetc(fp)) != EOF) {
+        if (body.len >= (128*1024) - 4096 &&
+            ((c & 0xc0) != 0x80 || body.len >= (128*1024) - 4096 + 3)) {
+            ungetc(c, fp);
+            break;
+        }
+        if (!c) {
+            agent_buf_puts(&out, "Tool error: read encountered binary data\n");
+            goto done;
+        }
+        last_line = line;
+        if (prefix && !bare) {
+            char label[80];
+            snprintf(label, sizeof(label), "%ld%s ", line, beginning ? "" : " (continued)");
+            agent_buf_puts(&body, label);
+        }
+        prefix = false;
+        beginning = false;
+        char ch = (char)c;
+        if (c == '\r') {
+            int next = fgetc(fp);
+            if (bare) agent_buf_append(&body, &ch, 1);
+            if (next == '\n') {
+                ch = '\n';
+            } else {
+                if (next != EOF) ungetc(next, fp);
+                if (bare) ch = 0;
+                else ch = '\n';
+            }
+        }
+        if (ch) agent_buf_append(&body, &ch, 1);
+        if (c == '\n' || c == '\r') {
+            if (line == LONG_MAX) { errno = EOVERFLOW; goto failed; }
+            line++;
+            lines++;
+            beginning = prefix = true;
+        }
+    }
+    if (ferror(fp)) goto failed;
+    off_t next_offset = ftello(fp);
+    if (next_offset < 0) goto failed;
+    c = fgetc(fp);
+    bool more = c != EOF;
+    if (ferror(fp)) goto failed;
+    if (whole_file && more) {
+        agent_buf_puts(&out, "Tool error: whole read exceeds the 128 KiB output limit; use read and more for chunks\n");
+        goto done;
+    }
+    if (!bare) {
+        char header[PATH_MAX + 128];
+        snprintf(header, sizeof(header), "%s: lines %ld-%ld%s\n", path,
+                 last_line ? start_line : 0, last_line, more ? " (partial read)" : " (end of file)");
+        agent_buf_puts(&out, header);
+    }
+    agent_buf_append(&out, body.ptr, body.len);
+    if (more) {
+        char note[256];
+        snprintf(note, sizeof(note), "\n[Read truncated. continue_offset=%ld; continue_byte_offset=%lld%s. Call more to continue.]\n",
+                 line, (long long)next_offset, beginning ? "" : " (within line)");
+        agent_buf_puts(&out, note);
+    }
+    if (set_more) {
+        if (more && path != w->more_path) snprintf(w->more_path, sizeof(w->more_path), "%s", path);
+        w->more_next = line; w->more_valid = more; w->more_raw = bare;
+        w->more_offset = next_offset;
+        w->more_mid_line = !beginning;
+    }
+    free(body.ptr);
+    fclose(fp);
+    return agent_buf_take(&out);
+failed:
+    agent_buf_puts(&out, "Tool error: read failed: ");
+    agent_buf_puts(&out, strerror(errno));
+    agent_buf_puts(&out, "\n");
+done:
+    if (fp) fclose(fp);
+    free(body.ptr);
+    if (set_more) w->more_valid = false;
+    return agent_buf_take(&out);
 }
 
 static char *tool_read(const char *path, long start, long maxl, bool whole, bool raw, more_state_t *more) {
     char ap[PATH_MAX];
-    if (!path || !*path)
-        return tool_err("read needs path", NULL);
-    if (!under_cwd(path, ap))
-        return tool_err("invalid path: ", path);
-    FILE *f = fopen(ap, "rb");
-    if (!f)
-        return tool_err("cannot open file: ", path);
-    struct stat st;
-    if (fstat(fileno(f), &st) || !S_ISREG(st.st_mode)) {
-        fclose(f);
-        return tool_err("not a regular file: ", path);
-    }
-    if (st.st_size > 8 * 1024 * 1024) {
-        fclose(f);
-        return tool_err("file too large (8 MB limit): ", path);
-    }
-    size_t cap = (size_t)st.st_size + 1;
-    char *data = xmalloc(cap);
-    size_t n = fread(data, 1, (size_t)st.st_size, f);
-    fclose(f);
-    data[n] = 0;
-    if (memchr(data, 0, n)) {
-        free(data);
-        return tool_err("binary file, use view_image for images: ", path);
-    }
-    /* Split lines. */
-    size_t lines = 1;
-    for (size_t i = 0; i < n; i++)
-        if (data[i] == '\n')
-            lines++;
-    long s = start > 0 ? start : 1;
-    long m = maxl > 0 ? maxl : (whole ? (long)lines : 160);
-    if (!whole && maxl <= 0)
-        m = 80; /* first look default 80-160 lines, like the agent prompt */
-    if (whole && (n > 128 * 1024)) {
-        free(data);
-        return tool_err("whole=true fails on files over 128 KiB; use chunks with more", NULL);
-    }
-    if (s < 1)
-        s = 1;
-    /* find byte offsets */
-    size_t off = 0;
-    long cur = 1;
-    while (off < n && cur < s) {
-        if (data[off++] == '\n')
-            cur++;
-    }
-    size_t end = off;
-    long shown = 0;
-    while (end < n && shown < m) {
-        if (data[end++] == '\n')
-            shown++;
-    }
-    bool truncated = end < n;
-    /* If byte-limited mid-line, 'more' continues exactly there. */
-    size_t chunk = end - off;
-    if (!whole && chunk > 128 * 1024) {
-        chunk = 128 * 1024;
-        end = off + chunk;
-        truncated = true;
-    }
-    char *out = NULL;
-    size_t ol = 0, oc = 0;
-    if (!raw) {
-        char head[512];
-        snprintf(head, sizeof(head), "lines %ld-%ld of %zu%s\n", s, s + shown - (shown ? 1 : 0), lines,
-            truncated ? " (more available)" : "");
-        buf_add(&out, &ol, &oc, head, strlen(head));
-        long ln = s;
-        size_t p = off;
-        char lb[32];
-        snprintf(lb, sizeof(lb), "%ld: ", ln);
-        buf_add(&out, &ol, &oc, lb, strlen(lb));
-        while (p < end) {
-            if (data[p] == '\n') {
-                buf_add(&out, &ol, &oc, "\n", 1);
-                ln++;
-                if (p + 1 < end) {
-                    snprintf(lb, sizeof(lb), "%ld: ", ln);
-                    buf_add(&out, &ol, &oc, lb, strlen(lb));
-                }
-            } else {
-                buf_add(&out, &ol, &oc, data + p, 1);
-            }
-            p++;
-        }
-        if (ol && out[ol - 1] != '\n')
-            buf_add(&out, &ol, &oc, "\n", 1);
-    } else {
-        buf_add(&out, &ol, &oc, data + off, chunk);
-    }
-    /* Save more cursor (byte-exact continuation). */
-    snprintf(more->more_path, sizeof(more->more_path), "%s", ap);
-    more->more_next = (int)(s + shown);
-    more->more_valid = truncated;
-    free(data);
-    return out;
+    if (!absolute_path(path, ap)) return tool_err("read requires path", NULL);
+    return tool_read_from(more, ap, start, maxl, whole, raw, true, 0, false);
 }
 
 static char *tool_more(long count, more_state_t *more) {
-    if (!more->more_valid)
-        return tool_err("nothing more to read; call read first", NULL);
-    long m = count > 0 ? count : 160;
-    /* Re-read from saved byte line: read starting at more_next. */
-    char rel[PATH_MAX];
-    snprintf(rel, sizeof(rel), "%s", more->more_path);
-    return tool_read(rel, more->more_next, m, false, false, more);
+    if (!more->more_valid) return tool_err("no previous output to continue", NULL);
+    return tool_read_from(more, more->more_path, more->more_next, count, false,
+                          more->more_raw, true, more->more_offset, more->more_mid_line);
 }
 
-static bool is_hardlink(const char *ap) {
-    struct stat st;
-    return !stat(ap, &st) && st.st_nlink > 1;
+static bool agent_same_file_version(const struct stat *a, const struct stat *b) {
+#ifdef __APPLE__
+    struct timespec am = a->st_mtimespec, bm = b->st_mtimespec;
+    struct timespec ac = a->st_ctimespec, bc = b->st_ctimespec;
+#else
+    struct timespec am = a->st_mtim, bm = b->st_mtim;
+    struct timespec ac = a->st_ctim, bc = b->st_ctim;
+#endif
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+           a->st_size == b->st_size && a->st_nlink == b->st_nlink &&
+           am.tv_sec == bm.tv_sec && am.tv_nsec == bm.tv_nsec &&
+           ac.tv_sec == bc.tv_sec && ac.tv_nsec == bc.tv_nsec;
+}
+
+#ifdef __linux__
+/* Linux stores ACLs as xattrs too. A metadata copy failure must abort the
+ * replacement, not silently remove access rules from the edited file. */
+static int agent_copy_file_xattrs(int src, int dst) {
+    if (fremovexattr(dst, "system.posix_acl_access") != 0 &&
+        errno != ENODATA && errno != ENOTSUP) return -1;
+    ssize_t count = flistxattr(src, NULL, 0);
+    if (count < 0) return errno == ENOTSUP ? 0 : -1;
+    if (!count) return 0;
+    char *names = xmalloc((size_t)count);
+    count = flistxattr(src, names, (size_t)count);
+    int rc = -1, saved_errno;
+    if (count < 0) goto done;
+    for (ssize_t pos = 0; pos < count;) {
+        const char *name = names + pos;
+        ssize_t len = fgetxattr(src, name, NULL, 0);
+        if (len < 0) goto done;
+        void *value = xmalloc(len ? (size_t)len : 1);
+        ssize_t readlen = fgetxattr(src, name, value, (size_t)len);
+        int copied = readlen < 0 ? -1 : fsetxattr(dst, name, value, (size_t)readlen, 0);
+        int saved_errno = errno;
+        free(value);
+        errno = saved_errno;
+        if (copied != 0) goto done;
+        pos += (ssize_t)strlen(name) + 1;
+    }
+    rc = 0;
+done:
+    saved_errno = errno;
+    free(names);
+    errno = saved_errno;
+    return rc;
+}
+#endif
+
+/* Commit only complete files. Follow existing symlinks, but refuse hard links:
+ * an atomic rename cannot preserve their shared-inode semantics. The version
+ * checks catch concurrent edits, though unrelated writers do not take a lock. */
+static int agent_replace_file(const char *path, const char *data, size_t len,
+                              const char *expected, size_t expected_len,
+                              char *err, size_t errlen) {
+    char target[PATH_MAX], temp[PATH_MAX] = "";
+    struct stat before, after;
+    int src = -1, fd = -1, rc = -1;
+    bool exists = lstat(path, &before) == 0;
+    if (!exists && errno != ENOENT) goto failed;
+    if (exists) {
+        if (!realpath(path, target)) goto failed;
+        src = open(target, O_RDWR | O_NONBLOCK | O_NOFOLLOW);
+        if (src < 0 || fstat(src, &before) != 0) goto failed;
+        if (!S_ISREG(before.st_mode) || before.st_nlink != 1) {
+            snprintf(err, errlen, "refusing to replace non-regular or hard-linked file: %s", path);
+            goto done;
+        }
+        if (expected) {
+            if (before.st_size < 0 || (uintmax_t)before.st_size != expected_len)
+                goto changed;
+            char buf[8192];
+            size_t pos = 0;
+            while (pos < expected_len) {
+                size_t count = expected_len - pos;
+                if (count > sizeof(buf)) count = sizeof(buf);
+                ssize_t n = read(src, buf, count);
+                if (n < 0 && errno == EINTR) continue;
+                if (n < 0) goto failed;
+                if (!n || memcmp(buf, expected + pos, (size_t)n)) goto changed;
+                pos += (size_t)n;
+            }
+        }
+    } else {
+        if (expected) goto changed;
+        if (snprintf(target, sizeof(target), "%s", path) >= (int)sizeof(target)) {
+            errno = ENAMETOOLONG;
+            goto failed;
+        }
+    }
+    if (snprintf(temp, sizeof(temp), "%s.loina-XXXXXX", target) >= (int)sizeof(temp)) {
+        temp[0] = 0;
+        errno = ENAMETOOLONG;
+        goto failed;
+    }
+    fd = mkstemp(temp);
+    if (fd < 0) { temp[0] = 0; goto failed; }
+    if (!exists) {
+        /* Let open apply the process umask without changing it in this thread. */
+        if (unlink(temp) != 0) goto failed;
+        close(fd);
+        fd = open(temp, O_WRONLY | O_CREAT | O_EXCL, 0666);
+        if (fd < 0) { temp[0] = 0; goto failed; }
+    }
+    for (size_t pos = 0; pos < len;) {
+        ssize_t n = write(fd, data + pos, len - pos);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { if (!n) errno = EIO; goto failed; }
+        pos += (size_t)n;
+    }
+    if (exists) {
+        if (fchown(fd, before.st_uid, before.st_gid) != 0) goto failed;
+        if (fchmod(fd, before.st_mode & 07777) != 0) goto failed;
+#ifdef __APPLE__
+        if (fcopyfile(src, fd, NULL, COPYFILE_ACL | COPYFILE_XATTR) != 0) goto failed;
+#elif defined(__linux__)
+        if (agent_copy_file_xattrs(src, fd) != 0) goto failed;
+#endif
+    }
+    if (fsync(fd) != 0) goto failed;
+    if (close(fd) != 0) { fd = -1; goto failed; }
+    fd = -1;
+    if (exists) {
+        char resolved[PATH_MAX];
+        if (!realpath(path, resolved) || strcmp(resolved, target) ||
+            stat(target, &after) != 0 || !agent_same_file_version(&before, &after))
+            goto changed;
+        if (rename(temp, target) != 0) goto failed;
+    } else {
+        /* Unlike rename, link will not overwrite a concurrently created file. */
+        if (link(temp, target) != 0) goto failed;
+        unlink(temp);
+    }
+    temp[0] = 0;
+    rc = 0;
+    goto done;
+changed:
+    snprintf(err, errlen, "file changed while editing; read it again: %s", path);
+    goto done;
+failed:
+    snprintf(err, errlen, "replace %s: %s", path, strerror(errno));
+done:
+    if (fd >= 0) close(fd);
+    if (src >= 0) close(src);
+    if (temp[0]) unlink(temp);
+    return rc;
 }
 
 static char *tool_write(const char *path, const char *content) {
-    char ap[PATH_MAX];
-    if (!path || !*path)
-        return tool_err("write needs path", NULL);
-    if (!under_cwd(path, ap))
-        return tool_err("invalid path: ", path);
-    if (is_hardlink(ap))
-        return tool_err("refusing hard-linked file: ", path);
-    /* Follow existing symlink target like ds4 (write through the link). */
-    char dir[PATH_MAX];
-    snprintf(dir, sizeof(dir), "%s", ap);
-    char *slash = strrchr(dir, '/');
-    if (slash) {
-        *slash = 0;
-        if (dir[0]) {
-            /* create parents */
-            char tmp[PATH_MAX];
-            snprintf(tmp, sizeof(tmp), "%s", dir);
-            for (char *p = tmp + 1; *p; p++) {
-                if (*p == '/') {
-                    *p = 0;
-                    mkdir(tmp, 0755);
-                    *p = '/';
-                }
-            }
-            mkdir(tmp, 0755);
-        }
-    }
-    char tmp[PATH_MAX + 8];
-    snprintf(tmp, sizeof(tmp), "%s.tmp-%d", ap, (int)getpid());
-    FILE *f = fopen(tmp, "wb");
-    if (!f)
-        return tool_err("cannot write file: ", path);
-    size_t n = content ? strlen(content) : 0;
-    if (n && fwrite(content, 1, n, f) != n) {
-        fclose(f);
-        remove(tmp);
-        return tool_err("write failed: ", path);
-    }
-    if (fclose(f)) {
-        remove(tmp);
-        return tool_err("write failed: ", path);
-    }
-    if (rename(tmp, ap)) {
-        remove(tmp);
-        return tool_err("cannot replace file: ", path);
-    }
-    char ok[PATH_MAX + 32];
-    snprintf(ok, sizeof(ok), "wrote %s (%zu bytes)", path, n);
-    return xstrdup(ok);
+    char ap[PATH_MAX], err[256];
+    if (!absolute_path(path, ap)) return tool_err("write requires path", NULL);
+    if (!content) return tool_err("write requires content", NULL);
+    if (agent_replace_file(ap, content, strlen(content), NULL, 0, err, sizeof(err)))
+        return tool_err(err, NULL);
+    char result[PATH_MAX+80];
+    snprintf(result, sizeof(result), "Wrote %zu bytes to %s\n", strlen(content), path);
+    return xstrdup(result);
 }
 
-static char *tool_edit(const char *path, const char *old_t, const char *new_t, bool allow_upto) {
+static char *tool_edit(const char *path, const char *old, const char *new, bool allow_upto) {
     char ap[PATH_MAX];
-    if (!path || !*path || !old_t || !new_t)
-        return tool_err("edit needs path, old and new", NULL);
-    if (!under_cwd(path, ap))
-        return tool_err("invalid path: ", path);
-    if (is_hardlink(ap))
-        return tool_err("refusing hard-linked file: ", path);
-    FILE *f = fopen(ap, "rb");
-    if (!f)
-        return tool_err("cannot open file: ", path);
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    rewind(f);
-    if (n < 0 || n > 8 * 1024 * 1024) {
-        fclose(f);
-        return tool_err("file too large: ", path);
+    if (!absolute_path(path, ap) || !old || !*old || !new)
+        return tool_err("edit requires path, nonempty old, and new", NULL);
+    FILE *f=open_regular_file(ap);
+    if (!f) return tool_err("cannot open file: ", path);
+    struct stat st;
+    if (fstat(fileno(f), &st) || st.st_size<0 || st.st_size>8*1024*1024) {
+        fclose(f); return tool_err("cannot edit file: ", path);
     }
-    char *data = xmalloc((size_t)n + 1);
-    if (n && fread(data, 1, (size_t)n, f) != (size_t)n) {
-        free(data);
-        fclose(f);
-        return tool_err("read failed: ", path);
+    size_t n=(size_t)st.st_size;
+    char *data=xmalloc(n+1);
+    bool ok=fread(data, 1, n, f)==n && !ferror(f);
+    fclose(f); data[n]=0;
+    if (!ok || memchr(data, 0, n)) { free(data); return tool_err("cannot read text file: ", path); }
+    char *head=NULL;
+    const char *upto=allow_upto ? strstr(old, "[upto]") : NULL;
+    if (upto) head=xstrndup(old, (size_t)(upto-old));
+    const char *needle=head ? head : old;
+    const char *first=*needle ? strstr(data, needle) : NULL;
+    const char *last=first ? first+strlen(needle) : NULL;
+    if (!first || strstr(first+1, needle)) ok=false;
+    if (upto && ok) {
+        const char *tail=upto+strlen("[upto]");
+        const char *match=*tail ? strstr(last, tail) : NULL;
+        if (!match || strstr(match+1, tail)) ok=false;
+        else last=match+strlen(tail);
     }
-    data[n] = 0;
-    fclose(f);
-    char *result = NULL;
-    if (allow_upto) {
-        const char *up = strstr(old_t, "[upto]");
-        if (up) {
-            size_t hl = (size_t)(up - old_t);
-            const char *tail = up + 7;
-            /* head must match once, tail once after head. */
-            char *head = xstrndup(old_t, hl);
-            const char *h1 = strstr(data, head);
-            const char *h2 = h1 ? strstr(h1 + 1, head) : NULL;
-            const char *t1 = h1 ? strstr(h1 + hl, tail) : NULL;
-            const char *t2 = t1 ? strstr(t1 + 1, tail) : NULL;
-            if (!h1 || h2 || !t1 || t2 || !*head || !*tail) {
-                free(head);
-                free(data);
-                return tool_err("edit fails: head/tail must each match exactly once", NULL);
-            }
-            size_t hn = strlen(head), tn = strlen(tail);
-            size_t nn = (size_t)n - ((size_t)(t1 + tn - h1)) + strlen(new_t);
-            result = xmalloc(nn + 1);
-            size_t pre = (size_t)(h1 - data);
-            memcpy(result, data, pre);
-            memcpy(result + pre, new_t, strlen(new_t));
-            strcpy(result + pre + strlen(new_t), t1 + tn);
-            (void)hn;
-            free(head);
-            free(data);
-            /* atomic replace */
-            char tmp[PATH_MAX + 8];
-            snprintf(tmp, sizeof(tmp), "%s.tmp-%d", ap, (int)getpid());
-            FILE *o = fopen(tmp, "wb");
-            if (!o) {
-                free(result);
-                return tool_err("cannot write file: ", path);
-            }
-            fwrite(result, 1, strlen(result), o);
-            fclose(o);
-            if (rename(tmp, ap)) {
-                remove(tmp);
-                free(result);
-                return tool_err("cannot replace file: ", path);
-            }
-            char ok[128];
-            snprintf(ok, sizeof(ok), "edited %s (anchored [upto])", path);
-            free(result);
-            return xstrdup(ok);
-        }
-    }
-    /* exact-once */
-    const char *a = strstr(data, old_t);
-    if (!a || !*old_t) {
-        free(data);
-        return tool_err("edit fails: old text not found exactly once", NULL);
-    }
-    if (strstr(a + 1, old_t)) {
-        free(data);
-        return tool_err("edit fails: old text matches multiple times", NULL);
-    }
-    size_t nn = (size_t)n - strlen(old_t) + strlen(new_t);
-    result = xmalloc(nn + 1);
-    size_t pre = (size_t)(a - data);
-    memcpy(result, data, pre);
-    memcpy(result + pre, new_t, strlen(new_t));
-    strcpy(result + pre + strlen(new_t), a + strlen(old_t));
-    free(data);
-    char tmp[PATH_MAX + 8];
-    snprintf(tmp, sizeof(tmp), "%s.tmp-%d", ap, (int)getpid());
-    FILE *o = fopen(tmp, "wb");
-    if (!o) {
-        free(result);
-        return tool_err("cannot write file: ", path);
-    }
-    fwrite(result, 1, strlen(result), o);
-    fclose(o);
-    if (rename(tmp, ap)) {
-        remove(tmp);
-        free(result);
-        return tool_err("cannot replace file: ", path);
-    }
-    char ok[128];
-    snprintf(ok, sizeof(ok), "edited %s", path);
-    free(result);
-    return xstrdup(ok);
+    free(head);
+    if (!ok) { free(data); return tool_err("edit fails: old text must match exactly once", NULL); }
+    size_t before=(size_t)(first-data), replacement=strlen(new), after=n-(size_t)(last-data);
+    char *result=xmalloc(before+replacement+after+1);
+    memcpy(result, data, before);
+    memcpy(result+before, new, replacement);
+    memcpy(result+before+replacement, last, after);
+    result[before+replacement+after]=0;
+    char err[256];
+    ok=!agent_replace_file(ap, result, before+replacement+after, data, n, err, sizeof(err));
+    free(data); free(result);
+    return ok ? xstrdup("Edited successfully.\n") : tool_err(err, NULL);
 }
 
 typedef struct {
@@ -923,293 +1048,299 @@ typedef struct {
     bool case_sens;
 } search_args_t;
 
-static char *tool_search(search_args_t *a) {
-    if (!a->query || !*a->query)
-        return tool_err("search needs query", NULL);
-    const char *root = (a->path && *a->path) ? a->path : ".";
-    bool regex_mode = a->mode && !strcmp(a->mode, "regex");
-    long ctx = a->context;
-    if (ctx < 0)
-        ctx = 0;
-    if (ctx > 5)
-        ctx = 5;
-    long maxr = a->max_results > 0 ? a->max_results : 50;
-    if (maxr < 1)
-        maxr = 1;
-    if (maxr > 500)
-        maxr = 500;
-    regex_t re;
-    bool have_re = false;
-    if (regex_mode) {
-        int fl = REG_EXTENDED | (a->case_sens ? 0 : REG_ICASE);
-        if (regcomp(&re, a->query, fl)) {
-            return tool_err("invalid regex: ", a->query);
-        }
-        have_re = true;
-    }
-    char *out = NULL;
-    size_t ol = 0, oc = 0;
-    long shown = 0;
-    bool incomplete = false;
-    /* Walk with opendir recursion (skip .git, nested symlinks). */
-    char stack[64][PATH_MAX];
-    int depth = 0;
-    char ap[PATH_MAX];
-    if (!under_cwd(root, ap)) {
-        if (have_re)
-            regfree(&re);
-        return tool_err("invalid path: ", root);
-    }
-    snprintf(stack[0], sizeof(stack[0]), "%s", ap);
-    depth = 1;
-    char qlow[2048];
-    snprintf(qlow, sizeof(qlow), "%s", a->query);
-    for (char *c = qlow; *c; c++)
-        *c = (char)tolower((unsigned char)*c);
-    while (depth > 0 && shown < maxr) {
-        char dir[PATH_MAX];
-        snprintf(dir, sizeof(dir), "%s", stack[--depth]);
-        DIR *d = opendir(dir);
-        if (!d) {
-            incomplete = true;
-            continue;
-        }
-        struct dirent *e;
-        while ((e = readdir(d)) && shown < maxr) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !strcmp(e->d_name, ".git"))
-                continue;
-            char full[PATH_MAX];
-            if (strlen(dir) + 1 + strlen(e->d_name) >= sizeof(full)) { incomplete = true; continue; }
-            snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
-            struct stat st;
-            if (lstat(full, &st))
-                continue;
-            if (S_ISLNK(st.st_mode))
-                continue; /* skip nested symlinks */
-            if (S_ISDIR(st.st_mode)) {
-                if (depth < 64) {
-                    snprintf(stack[depth++], PATH_MAX, "%s", full);
-                } else
-                    incomplete = true;
-                continue;
+typedef struct {
+    const char *query;
+    const char *glob;
+    regex_t regex;
+    bool use_regex;
+    bool regex_ready;
+    bool case_sensitive;
+    int context;
+    int max_results;
+    int results;
+    size_t skipped;
+    char first_skip[PATH_MAX + 128];
+    agent_buf out;
+} agent_search_ctx;
+
+static bool agent_literal_match(const char *s, size_t n, const char *q,
+                                bool case_sensitive) {
+    size_t qn = strlen(q);
+    if (!qn) return true;
+    if (qn > n) return false;
+    for (size_t i = 0; i + qn <= n; i++) {
+        bool ok = true;
+        for (size_t j = 0; j < qn; j++) {
+            unsigned char a = (unsigned char)s[i + j];
+            unsigned char b = (unsigned char)q[j];
+            if (!case_sensitive) {
+                a = (unsigned char)tolower(a);
+                b = (unsigned char)tolower(b);
             }
-            if (!S_ISREG(st.st_mode) || st.st_size > 2 * 1024 * 1024)
-                continue;
-            if (a->glob && *a->glob && fnmatch(a->glob, e->d_name, 0))
-                continue;
-            FILE *f = fopen(full, "rb");
-            if (!f) {
-                incomplete = true;
-                continue;
-            }
-            char *line = NULL;
-            size_t ll = 0;
-            ssize_t nl;
-            long lineno = 0;
-            /* keep context ring */
-            char *ring[5] = {0};
-            int ri = 0;
-            while ((nl = getline(&line, &ll, f)) >= 0) {
-                lineno++;
-                if (memchr(line, 0, (size_t)nl))
-                    break; /* binary */
-                bool hit = false;
-                if (have_re) {
-                    hit = !regexec(&re, line, 0, NULL, 0);
-                } else if (a->case_sens) {
-                    hit = strstr(line, a->query) != NULL;
-                } else {
-                    char *low = xstrndup(line, (size_t)nl);
-                    for (char *c = low; *c; c++)
-                        *c = (char)tolower((unsigned char)*c);
-                    hit = strstr(low, qlow) != NULL;
-                    free(low);
-                }
-                if (hit) {
-                    /* emit with context */
-                    char head[PATH_MAX + 64];
-                    const char *rel = full;
-                    char cwd[PATH_MAX];
-                    if (getcwd(cwd, sizeof(cwd)) && !strncmp(full, cwd, strlen(cwd)))
-                        rel = full + strlen(cwd) + (full[strlen(cwd)] == '/' ? 1 : 0);
-                    /* prior context */
-                    for (long k = ctx; k > 0; k--) {
-                        int idx = (ri - (int)k + 20) % 5;
-                        if (ctx > 0 && ring[idx]) {
-                            snprintf(head, sizeof(head), "%s:%ld-%s", rel, lineno - k, "");
-                            buf_add(&out, &ol, &oc, head, strlen(head));
-                            buf_add(&out, &ol, &oc, ring[idx], strlen(ring[idx]));
-                        }
-                    }
-                    snprintf(head, sizeof(head), "%s:%ld: ", rel, lineno);
-                    buf_add(&out, &ol, &oc, head, strlen(head));
-                    size_t ln2 = strlen(line);
-                    if (ln2 > 500) {
-                        line[500] = 0;
-                        ln2 = 500;
-                    }
-                    buf_add(&out, &ol, &oc, line, ln2);
-                    if (ol && out[ol - 1] != '\n')
-                        buf_add(&out, &ol, &oc, "\n", 1);
-                    shown++;
-                    if (shown >= maxr)
-                        break;
-                    /* following context handled by ring naturally on next hits;
-                     * for simplicity emit next ctx lines eagerly */
-                    for (long k = 0; k < ctx && shown < maxr; k++) {
-                        ssize_t n2 = getline(&line, &ll, f);
-                        if (n2 < 0)
-                            break;
-                        lineno++;
-                        snprintf(head, sizeof(head), "%s:%ld-%s", rel, lineno, "");
-                        buf_add(&out, &ol, &oc, head, strlen(head));
-                        buf_add(&out, &ol, &oc, line, strlen(line));
-                    }
-                }
-                if (ctx > 0) {
-                    free(ring[ri]);
-                    ring[ri] = xstrndup(line, strlen(line));
-                    ri = (ri + 1) % 5;
-                }
-                if (ol > 120 * 1024)
-                    break;
-            }
-            for (int k = 0; k < 5; k++)
-                free(ring[k]);
-            free(line);
-            fclose(f);
-            if (ol > 120 * 1024) {
-                incomplete = true;
+            if (a != b) {
+                ok = false;
                 break;
             }
         }
-        closedir(d);
+        if (ok) return true;
     }
-    if (have_re)
-        regfree(&re);
-    if (!shown) {
-        free(out);
-        return xstrdup("no matches");
+    return false;
+}
+
+static bool agent_search_line_matches(agent_search_ctx *ctx, const char *s, size_t n) {
+    if (ctx->use_regex) {
+        char *line = xstrndup(s, n);
+        int rc = regexec(&ctx->regex, line, 0, NULL, 0);
+        free(line);
+        return rc == 0;
     }
-    if (incomplete) {
-        buf_add(&out, &ol, &oc, "(incomplete coverage: skipped unreadable paths)\n", 47);
+    return agent_literal_match(s, n, ctx->query, ctx->case_sensitive);
+}
+
+static void agent_search_emit_line(agent_search_ctx *ctx, const char *data,
+                                   int line_no) {
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "  %d ", line_no);
+    agent_buf_puts(&ctx->out, prefix);
+    agent_buf_puts(&ctx->out, data);
+    agent_buf_puts(&ctx->out, "\n");
+}
+
+static void agent_search_skip(agent_search_ctx *ctx, const char *path, const char *why) {
+    ctx->skipped++;
+    if (!ctx->first_skip[0])
+        snprintf(ctx->first_skip, sizeof(ctx->first_skip), "%s: %s", path, why);
+}
+
+/* A file can be arbitrarily large; only the current line and a small context
+ * ring are resident. Oversized or binary lines are reported, never ignored. */
+static int agent_search_read_line(FILE *fp, char **text) {
+    agent_buf line = {0};
+    int c;
+    while ((c = fgetc(fp)) != EOF) {
+        if (!c || line.len == AGENT_TOOL_MAX_BYTES) {
+            free(line.ptr);
+            return -2;
+        }
+        if (c == '\n' || c == '\r') {
+            if (c == '\r') {
+                int next = fgetc(fp);
+                if (next != '\n' && next != EOF) ungetc(next, fp);
+            }
+            break;
+        }
+        char ch = (char)c;
+        agent_buf_append(&line, &ch, 1);
     }
-    return out;
+    if (ferror(fp)) { free(line.ptr); return -1; }
+    if (c == EOF && !line.len) { free(line.ptr); return 0; }
+    *text = agent_buf_take(&line);
+    return 1;
+}
+
+/* Search one text file and emit matching lines with plain line numbers. */
+static void agent_search_file(agent_search_ctx *ctx, const char *path) {
+    if (ctx->results >= ctx->max_results || ctx->out.truncated) return;
+    if (ctx->glob && ctx->glob[0]) {
+        const char *base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        if (fnmatch(ctx->glob, base, 0) != 0 && fnmatch(ctx->glob, path, 0) != 0)
+            return;
+    }
+    FILE *fp = open_regular_file(path);
+    if (!fp) { agent_search_skip(ctx, path, strerror(errno)); return; }
+    char *ring[6] = {0};
+    bool printed_file = false;
+    int line = 0, last_emitted = 0, after = 0;
+    while ((ctx->results < ctx->max_results || after) && !ctx->out.truncated) {
+        char *text = NULL;
+        int rc = agent_search_read_line(fp, &text);
+        if (!rc) break;
+        if (rc < 0) {
+            agent_search_skip(ctx, path, rc == -2 ? "binary data or line exceeds 128 KiB" : strerror(errno));
+            break;
+        }
+        if (line == INT_MAX) {
+            free(text);
+            agent_search_skip(ctx, path, "line number limit reached");
+            break;
+        }
+        line++;
+        free(ring[line % 6]);
+        ring[line % 6] = text;
+        bool match = ctx->results < ctx->max_results &&
+                     agent_search_line_matches(ctx, text, strlen(text));
+        if (match && !printed_file) {
+            agent_buf_puts(&ctx->out, path);
+            agent_buf_puts(&ctx->out, "\n");
+            printed_file = true;
+        }
+        if (match) {
+            int from = line - ctx->context;
+            if (from < 1) from=1;
+            if (from <= last_emitted) from = last_emitted + 1;
+            for (int j = from; j <= line; j++)
+                agent_search_emit_line(ctx, ring[j % 6], j);
+            last_emitted = line;
+            after = ctx->context;
+            ctx->results++;
+        } else if (after) {
+            agent_search_emit_line(ctx, text, line);
+            last_emitted = line;
+            after--;
+        }
+    }
+    if (printed_file) agent_buf_puts(&ctx->out, "\n");
+    for (int i = 0; i < 6; i++) free(ring[i]);
+    fclose(fp);
+}
+
+/* Recursively search a file or directory, avoiding .git and stopping once the
+ * result cap is reached. */
+static void agent_search_path(agent_search_ctx *ctx, const char *path, int depth) {
+    if (ctx->results >= ctx->max_results || ctx->out.truncated) return;
+    if (depth > 24) { agent_search_skip(ctx, path, "directory depth limit reached"); return; }
+    struct stat st;
+    if ((depth == 0 ? stat(path, &st) : lstat(path, &st)) != 0) {
+        agent_search_skip(ctx, path, strerror(errno));
+        return;
+    }
+    if (S_ISREG(st.st_mode)) {
+        agent_search_file(ctx, path);
+        return;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        agent_search_skip(ctx, path, "not a regular file or directory (nested symlinks are not followed)");
+        return;
+    }
+    DIR *dir = opendir(path);
+    if (!dir) { agent_search_skip(ctx, path, strerror(errno)); return; }
+    struct dirent *de;
+    while (ctx->results < ctx->max_results && !ctx->out.truncated) {
+        errno = 0;
+        de = readdir(dir);
+        if (!de) {
+            if (errno) agent_search_skip(ctx, path, strerror(errno));
+            break;
+        }
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        if (!strcmp(de->d_name, ".git")) continue;
+        char child[PATH_MAX];
+        if (snprintf(child, sizeof(child), "%s/%s", path, de->d_name) >= (int)sizeof(child)) {
+            agent_search_skip(ctx, path, "path exceeds PATH_MAX");
+            continue;
+        }
+        agent_search_path(ctx, child, depth + 1);
+    }
+    closedir(dir);
+}
+
+static char *tool_search(search_args_t *a) {
+    const char *query = a->query;
+    if (!query || !query[0]) return xstrdup("Tool error: search requires query\n");
+    const char *path = a->path;
+    if (!path || !path[0]) path = ".";
+    const char *mode = a->mode;
+    if (mode && strcmp(mode, "literal") && strcmp(mode, "regex"))
+        return xstrdup("Tool error: search mode must be literal or regex (POSIX extended)\n");
+    struct stat root;
+    if (stat(path, &root) != 0 || (!S_ISDIR(root.st_mode) && !S_ISREG(root.st_mode))) {
+        agent_buf error = {0};
+        agent_buf_puts(&error, "Tool error: search path is missing, unreadable, or not a regular file/directory: ");
+        agent_buf_puts(&error, path);
+        agent_buf_puts(&error, "\n");
+        return agent_buf_take(&error);
+    }
+    agent_search_ctx ctx = {
+        .query = query,
+        .glob = a->glob,
+        .use_regex = mode && !strcmp(mode, "regex"),
+        .case_sensitive = a->case_sens,
+        .context = (int)(a->context<0 ? 0 : a->context>5 ? 5 : a->context),
+        .max_results = (int)(a->max_results<1 ? 1 : a->max_results>500 ? 500 : a->max_results),
+        .out = {.limit = AGENT_TOOL_MAX_BYTES},
+    };
+    if (ctx.use_regex) {
+        int flags = REG_EXTENDED | REG_NOSUB;
+        if (!ctx.case_sensitive) flags |= REG_ICASE;
+        int rc = regcomp(&ctx.regex, query, flags);
+        if (rc != 0) {
+            char msg[256];
+            regerror(rc, &ctx.regex, msg, sizeof(msg));
+            agent_buf b = {0};
+            agent_buf_puts(&b, "Tool error: invalid regex: ");
+            agent_buf_puts(&b, msg);
+            agent_buf_puts(&b, "\n");
+            return agent_buf_take(&b);
+        }
+        ctx.regex_ready = true;
+    }
+    agent_search_path(&ctx, path, 0);
+    if (ctx.regex_ready) regfree(&ctx.regex);
+    if (!ctx.out.ptr) agent_buf_puts(&ctx.out, "No matches in searched text\n");
+    else {
+        char hdr[96];
+        snprintf(hdr, sizeof(hdr), "%d match%s shown\n\n",
+                 ctx.results, ctx.results == 1 ? "" : "es");
+        size_t hdr_len = strlen(hdr);
+        if (ctx.out.len + hdr_len + 1 > ctx.out.cap) {
+            ctx.out.cap = ctx.out.len + hdr_len + 1;
+            ctx.out.ptr = xrealloc(ctx.out.ptr, ctx.out.cap);
+        }
+        memmove(ctx.out.ptr + hdr_len, ctx.out.ptr, ctx.out.len + 1);
+        memcpy(ctx.out.ptr, hdr, hdr_len);
+        ctx.out.len += hdr_len;
+    }
+    ctx.out.limit = 0;
+    if (ctx.skipped || ctx.results >= ctx.max_results) {
+        bool truncated = ctx.out.truncated;
+        ctx.out.truncated = false;
+        char note[PATH_MAX + 256];
+        snprintf(note, sizeof(note), "\nSearch incomplete: %zu skipped paths%s. %s\n",
+                 ctx.skipped, ctx.results >= ctx.max_results ? "; match limit reached" : "", ctx.first_skip);
+        agent_buf_puts(&ctx.out, note);
+        ctx.out.truncated = truncated;
+    }
+    return agent_buf_take(&ctx.out);
 }
 
 static char *tool_list(const char *path) {
-    char ap[PATH_MAX];
-    const char *p = (path && *path) ? path : ".";
-    if (!under_cwd(p, ap))
-        return tool_err("invalid path: ", p);
-    DIR *d = opendir(ap);
-    if (!d)
-        return tool_err("cannot list directory: ", p);
-    char *out = NULL;
-    size_t ol = 0, oc = 0;
-    struct dirent *e;
-    int n = 0;
-    while ((e = readdir(d)) && n < 200) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
-            continue;
+    if (!path || !path[0]) path = ".";
+    DIR *dir = opendir(path);
+    if (!dir) {
+        agent_buf b = {0};
+        agent_buf_puts(&b, "Tool error: opendir failed: ");
+        agent_buf_puts(&b, strerror(errno));
+        agent_buf_puts(&b, "\n");
+        return agent_buf_take(&b);
+    }
+    agent_buf out = {.limit = AGENT_TOOL_MAX_BYTES};
+    char hdr[PATH_MAX + 64];
+    snprintf(hdr, sizeof(hdr), "%s:\n", path);
+    agent_buf_puts(&out, hdr);
+    struct dirent *de;
+    int shown = 0;
+    while ((de = readdir(dir)) != NULL && shown < 300) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
         char full[PATH_MAX];
-        if (strlen(ap) + 1 + strlen(e->d_name) >= sizeof(full)) continue;
-        snprintf(full, sizeof(full), "%s/%s", ap, e->d_name);
+        if (snprintf(full, sizeof(full), "%s/%s", path, de->d_name) >= (int)sizeof(full)) continue;
         struct stat st;
-        if (stat(full, &st))
-            continue;
-        char line[PATH_MAX + 64];
-        if (S_ISDIR(st.st_mode))
-            snprintf(line, sizeof(line), "%s/\n", e->d_name);
-        else
-            snprintf(line, sizeof(line), "%s (%lld bytes)\n", e->d_name, (long long)st.st_size);
-        buf_add(&out, &ol, &oc, line, strlen(line));
-        n++;
+        if (lstat(full, &st) != 0) continue;
+        char type = S_ISDIR(st.st_mode) ? 'd' :
+                    S_ISLNK(st.st_mode) ? 'l' :
+                    S_ISREG(st.st_mode) ? '-' : '?';
+        char line[PATH_MAX + 96];
+        snprintf(line, sizeof(line), "%c %10lld %s%s\n", type,
+                 (long long)st.st_size, de->d_name, S_ISDIR(st.st_mode) ? "/" : "");
+        agent_buf_puts(&out, line);
+        shown++;
     }
-    closedir(d);
-    if (!out)
-        return xstrdup("(empty directory)");
-    return out;
+    if (de) agent_buf_puts(&out, "... more entries omitted ...\n");
+    closedir(dir);
+    return agent_buf_take(&out);
 }
 
-static char *tool_bash(const char *command, long timeout_sec) {
-    if (!command || !*command)
-        return tool_err("bash needs command", NULL);
-    if (strlen(command) > 8000)
-        return tool_err("command too long", NULL);
-    long to = timeout_sec > 0 ? timeout_sec : 30;
-    if (to < 1)
-        to = 1;
-    if (to > 600)
-        to = 600;
-    int pipefd[2];
-    if (pipe(pipefd))
-        return tool_err("cannot run command", NULL);
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return tool_err("cannot fork", NULL);
-    }
-    if (pid == 0) {
-        /* child: run through sh, merge stderr, enforce timeout via alarm */
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[0]);
-        close(pipefd[1]);
-        alarm((unsigned)to);
-        execl("/bin/sh", "sh", "-c", command, (char *)NULL);
-        _exit(127);
-    }
-    close(pipefd[1]);
-    char *out = NULL;
-    size_t ol = 0, oc = 0;
-    char tmp[4096];
-    ssize_t n;
-    time_t deadline = time(NULL) + to + 2;
-    FILE *f = fdopen(pipefd[0], "r");
-    if (f) {
-        /* blocking read; child alarm bounds execution */
-        while ((n = fread(tmp, 1, sizeof(tmp), f)) > 0) {
-            if (ol + (size_t)n > 256 * 1024) {
-                size_t keep = 256 * 1024 - ol;
-                if (keep)
-                    buf_add(&out, &ol, &oc, tmp, keep);
-                break;
-            }
-            buf_add(&out, &ol, &oc, tmp, (size_t)n);
-            if (time(NULL) > deadline)
-                break;
-        }
-        fclose(f);
-    } else {
-        close(pipefd[0]);
-    }
-    int status = 0;
-    /* wait with timeout */
-    time_t wend = time(NULL) + to + 5;
-    pid_t w;
-    while ((w = waitpid(pid, &status, WNOHANG)) == 0 && time(NULL) < wend)
-        usleep(50000);
-    if (w == 0) {
-        kill(pid, 9);
-        waitpid(pid, &status, 0);
-        buf_add(&out, &ol, &oc, "\n[timeout]\n", 11);
-    }
-    char tail[128];
-    if (WIFEXITED(status))
-        snprintf(tail, sizeof(tail), "\n[exit code: %d]\n", WEXITSTATUS(status));
-    else if (WIFSIGNALED(status))
-        snprintf(tail, sizeof(tail), "\n[signal: %d]\n", WTERMSIG(status));
-    else
-        snprintf(tail, sizeof(tail), "\n[done]\n");
-    buf_add(&out, &ol, &oc, tail, strlen(tail));
-    if (!out)
-        return xstrdup("[exit code: 0]\n");
-    return out;
-}
-
-/* ---------- DSML parsing (agent tool protocol) ---------- */
+/* ---------- native and legacy tool parsing ---------- */
 
 typedef struct {
     char *name;
@@ -1242,26 +1373,7 @@ static void tcalls_free(tcalls_t *t) {
     t->len = t->cap = 0;
 }
 
-static void unescape_param(char *s) {
-    /* &lt;/loina_param> -> </loina_param>, &amp;lt; -> &lt; */
-    char *w = s;
-    for (char *r = s; *r;) {
-        if (!strncmp(r, "&lt;/loina_param>", 18)) {
-            memcpy(w, "</loina_param>", 15);
-            w += 15;
-            r += 18;
-        } else if (!strncmp(r, "&amp;lt;", 8)) {
-            memcpy(w, "&lt;", 4);
-            w += 4;
-            r += 8;
-        } else {
-            *w++ = *r++;
-        }
-    }
-    *w = 0;
-}
-
-static int parse_calls(const char *reply, tcalls_t *out) {
+static int parse_legacy_calls(const char *reply, tcalls_t *out) {
     memset(out, 0, sizeof(*out));
     const char *block = strstr(reply, "<loina_tool_calls>");
     if (!block)
@@ -1333,13 +1445,11 @@ static int parse_calls(const char *reply, tcalls_t *out) {
                 goto fail;
             }
             char *val = xstrndup(pgt + 1, (size_t)(pend - pgt - 1));
-            unescape_param(val);
+            ds4_tool_text_unescape(val, "</loina_param>");
             /* trim one surrounding newline (ds4 convention) */
-            while (*val == '\n')
-                memmove(val, val + 1, strlen(val));
+            if (*val == '\n') memmove(val, val + 1, strlen(val));
             size_t vl = strlen(val);
-            while (vl && val[vl - 1] == '\n')
-                val[--vl] = 0;
+            if (vl && val[vl - 1] == '\n') val[--vl] = 0;
             if (c->argc == c->cap) {
                 c->cap = c->cap ? c->cap * 2 : 4;
                 c->args = xrealloc(c->args, (size_t)c->cap * sizeof(*c->args));
@@ -1357,6 +1467,53 @@ static int parse_calls(const char *reply, tcalls_t *out) {
     return out->len;
 fail:
     tcalls_free(out);
+    return -1;
+}
+
+static int parse_calls(const char *reply, tcalls_t *out) {
+    const char *thinking = strstr(reply, "</think>");
+    if (thinking) reply = thinking + 8;
+    else if (strstr(reply, "<think>")) { memset(out, 0, sizeof(*out)); return 0; }
+    if (!strstr(reply, "<tool_call>")) return parse_legacy_calls(reply, out);
+    memset(out, 0, sizeof(*out));
+    const char *p = reply;
+    while ((p = strstr(p, "<tool_call>"))) {
+        p += strlen("<tool_call>");
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "<function=", 10) || out->len == 4) goto malformed;
+        const char *name = p+10, *gt = strchr(name, '>');
+        if (!gt || gt == name) goto malformed;
+        out->v = xrealloc(out->v, (size_t)(out->len+1)*sizeof(*out->v));
+        tcall_t *call = &out->v[out->len++];
+        memset(call, 0, sizeof(*call));
+        call->name = xstrndup(name, (size_t)(gt-name));
+        p = gt+1;
+        while (1) {
+            while (isspace((unsigned char)*p)) p++;
+            if (!strncmp(p, "</function>", 11)) { p += 11; break; }
+            if (strncmp(p, "<parameter=", 11) || call->argc == 20) goto malformed;
+            const char *arg=p+11;
+            gt=strchr(arg, '>');
+            const char *close=gt ? strstr(gt+1, "</parameter>") : NULL;
+            if (!gt || gt==arg || !close) goto malformed;
+            call->args=xrealloc(call->args, (size_t)(call->argc+1)*sizeof(*call->args));
+            targ_t *param=&call->args[call->argc++];
+            param->name=xstrndup(arg, (size_t)(gt-arg));
+            const char *value=gt+1, *last=close;
+            if (*value == '\n') value++;
+            if (last>value && last[-1]=='\n') last--;
+            param->value=xstrndup(value, (size_t)(last-value));
+            ds4_tool_text_unescape(param->value, "</parameter>");
+            p=close+strlen("</parameter>");
+        }
+        while (isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "</tool_call>", 12)) goto malformed;
+        p += 12;
+    }
+    return out->len;
+malformed:
+    tcalls_free(out);
+    snprintf(out->error, sizeof(out->error), "Incomplete native tool call");
     return -1;
 }
 
@@ -1414,14 +1571,15 @@ static void agent_help(void) {
          "  --prompt-file FILE    Read the initial task from a file\n"
          "  --non-interactive     Never prompt; exit after tool loop\n"
          "  --edit-upto           Allow [upto] anchored edits\n"
-         "  --chdir PATH          Run local tools in PATH\n"
+         "  --chdir PATH          Run local tools in PATH (default new /tmp/loina-agent-* directory)\n"
          "  -m FILE               Import catalog model file (siblings if needed)\n"
          "  --package ID          Use an immutable package\n"
          "  --import DIRECTORY    Install selected package from local artifacts\n"
          "  --session ID          Resume a saved conversation\n"
-         "  --cache-dir PATH      Packages, transcripts, KV (default .loina)\n"
+         "  --model-dir PATH      Model files (default gguf/ beside the executable)\n"
+         "  --cache-dir PATH      Sessions and KV (default ~/.loina/kvcache)\n"
          "  --ctx N               Context size, max 32768 (default 32768)\n"
-         "  -n N                  Max tokens per turn (default 2048 thinking, 1024 plain)\n"
+         "  -n N                  Max tokens per turn (default 8192 thinking, 4096 plain)\n"
          "  --threads N           CPU threads\n"
          "  --backend NAME        CPU, Vulkan, OpenCL, Metal or CUDA\n"
          "  --temp F --top-p F --min-p F  Sampling\n"
@@ -1429,58 +1587,22 @@ static void agent_help(void) {
          "  --thinking on|off     Reasoning when the package allows it (default on)\n"
          "  --vision FILE         Attach an image to the first task\n"
          "REPL: /help /think /nothink /save /list /switch ID /del ID /new /read FILE /quit\n"
-         "Tools: read more write edit search list bash view_image web_search web_visit.");
+         "Tools: google_search visit_page bash bash_status bash_stop read more write edit search list view_image.");
 }
 
-/* Agent system template: overrides bundled system.jinja so the model learns
- * the local DSML tool protocol instead of the app web-tool text. */
-static const char agent_system_jinja[] =
-    "Today's date: {{ date }}.\n"
-    "You are Loina, a coding agent running locally in the user's workspace. Use tools for local work. "
-    "Avoid printing large files; create or edit files with tools, then summarize briefly.\n\n"
-    "## Tools\n\n"
-    "Invoke tools with exactly this shape (never inside <think>):\n\n"
-    "<loina_tool_calls>\n"
-    "<loina_invoke name=\"read\">\n"
-    "<loina_param name=\"path\">src/main.c</loina_param>\n"
-    "<loina_param name=\"start_line\">1</loina_param>\n"
-    "<loina_param name=\"max_lines\">120</loina_param>\n"
-    "</loina_invoke>\n"
-    "</loina_tool_calls>\n\n"
-    "Read returns a bounded chunk, not the whole file. For first looks prefer max_lines 80-160; "
-    "if more lines are available, call more with count. Use whole=true only when asked for the complete file; "
-    "it fails over 128 KiB. raw=true omits line numbers.\n"
-    "Search is literal (default) or regex (POSIX extended). Defaults: path=., case_sensitive=true, context=0, max_results=50. "
-    "context is 0-5, max_results 1-500. Skips .git and symlinks.\n"
-    "bash runs a shell command (timeout_sec default 30, max 600). Long commands should set timeout_sec.\n"
-    "Write and edit replace files atomically and refuse hard-linked files.\n"
-    "Use edit with path, old, new. old must match exactly once. For inserts, anchor on unique text.\n"
-    "Use view_image with path to see a local PNG/JPEG.\n"
-    "Use web_search(query) for current facts and web_visit(url) for a known HTTPS page.\n\n"
-    "### Schemas\n\n"
-    "{\"name\":\"read\",\"params\":[\"path\",\"start_line\",\"max_lines\",\"whole\",\"raw\"]}\n"
-    "{\"name\":\"more\",\"params\":[\"count\"]}\n"
-    "{\"name\":\"write\",\"params\":[\"path\",\"content\"]}\n"
-    "{\"name\":\"edit\",\"params\":[\"path\",\"old\",\"new\"]}\n"
-    "{\"name\":\"search\",\"params\":[\"query\",\"path\",\"mode\",\"glob\",\"context\",\"max_results\",\"case_sensitive\"]}\n"
-    "{\"name\":\"list\",\"params\":[\"path\"]}\n"
-    "{\"name\":\"bash\",\"params\":[\"command\",\"timeout_sec\"]}\n"
-    "{\"name\":\"view_image\",\"params\":[\"path\"]}\n"
-    "{\"name\":\"web_search\",\"params\":[\"query\"]}\n"
-    "{\"name\":\"web_visit\",\"params\":[\"url\"]}\n\n"
-    "# Rules\n"
-    "- State the target filename before editing; put path first.\n"
-    "- Prefer read/search + edit over rewriting whole files.\n"
-    "- Preserve system configuration unless asked otherwise.\n";
-
-static bool write_agent_template(const char *dir) {
+static bool write_agent_template(const char *dir, bool edit_upto) {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/system.jinja", dir);
     FILE *f = fopen(path, "wb");
     if (!f)
         return false;
-    size_t n = strlen(agent_system_jinja);
-    bool ok = fwrite(agent_system_jinja, 1, n, f) == n && !fclose(f);
+    const char *parts[] = {agent_system_jinja, edit_upto ? agent_edit_upto : agent_edit_exact, agent_rules_tail};
+    bool ok = true;
+    for (size_t i=0; i<sizeof(parts)/sizeof(*parts); i++) {
+        size_t n = strlen(parts[i]);
+        if (fwrite(parts[i], 1, n, f) != n) ok = false;
+    }
+    if (fclose(f)) ok = false;
     if (!ok)
         remove(path);
     return ok;
@@ -1493,6 +1615,7 @@ typedef struct {
     loina_session *session;
     agent_cfg_t *cfg;
     more_state_t *more;
+    int streamed_tools;
 } agent_t;
 
 static char *run_turn(agent_t *a, const char *prompt, const char *vision_path, bool *cancelled) {
@@ -1500,15 +1623,21 @@ static char *run_turn(agent_t *a, const char *prompt, const char *vision_path, b
     r.session = a->session;
     r.prompt = prompt;
     r.input_path = vision_path;
-    r.tools = false; /* agent DSML handled outside the core web loop */
+    r.tools = false;
+    r.tool_schema = agent_tool_schema;
+    r.tool_response = !strncmp(prompt, "<tool_response>", 15);
+    if (a->cfg->package_id) r.package = loina_catalog_find(a->cfg->package_id);
     r.thinking = a->cfg->thinking;
-    r.max_tokens = a->cfg->n_set ? a->cfg->max_tokens : (a->cfg->thinking ? 2048 : 1024);
+    r.max_tokens = a->cfg->n_set ? a->cfg->max_tokens : (a->cfg->thinking ? 8192 : 4096);
+    uint32_t capacity = a->cfg->engine_cfg.context ? a->cfg->engine_cfg.context : 32768;
+    if (!a->cfg->n_set && r.max_tokens >= capacity) r.max_tokens = capacity / 2;
     r.temperature = a->cfg->temp;
     r.top_p = a->cfg->top_p;
     r.min_p = a->cfg->min_p;
     if (a->cfg->seed_set)
         r.seed = a->cfg->seed;
-    stream_t s = {.use_color = isatty(fileno(stdout)) != 0, .last_nl = true};
+    a->streamed_tools = 0;
+    stream_t s = {.use_color = (loina_terminal_active() || isatty(fileno(stdout))), .last_nl = true, .context=capacity};
     loina_error err = {0};
     loina_job *job = loina_job_create(a->engine, &r, stream_event, &s, &err);
     if (!job) {
@@ -1517,22 +1646,22 @@ static char *run_turn(agent_t *a, const char *prompt, const char *vision_path, b
     }
     s.job = job;
     g_job = job;
-    g_interrupted = 0;
+    loina_terminal_job(job);
+    loina_terminal_event(LOINA_PROGRESS, "", 0);
     loina_status st = loina_job_run(job, &err);
+    loina_terminal_job(NULL);
     g_job = NULL;
     s_write(&s, NULL, 0, true);
-    if (s.color_open) {
-        fputs("\x1b[0m", stdout);
-        s.color_open = false;
-    }
+    a->streamed_tools = s.streamed_tools;
     if (!s.last_nl) {
         putchar('\n');
         fflush(stdout);
     }
-    if (s.have_metrics && !st) {
+    bool interactive_ui = loina_terminal_active();
+    if (s.have_metrics && !st && !interactive_ui) {
         bool ttyerr = isatty(fileno(stderr)) != 0;
         fprintf(stderr, "%sloina-agent: prefill: %.2f t/s, generation: %.2f t/s%s\n",
-            ttyerr ? "\x1b[32m" : "", s.prefill, s.decode, ttyerr ? "\x1b[0m" : "");
+            ttyerr ? "\x1b[38;2;177;161;245m" : "", s.prefill, s.decode, ttyerr ? "\x1b[0m" : "");
     }
     char *result = NULL;
     if (!st) {
@@ -1546,7 +1675,7 @@ static char *run_turn(agent_t *a, const char *prompt, const char *vision_path, b
             fprintf(stderr, "%s\n", err.message);
         }
     }
-    free(s.buf);
+    loina_renderer_free(s.renderer);
     loina_job_free(job);
     return result;
 }
@@ -1569,14 +1698,16 @@ static char *run_vision_desc(agent_t *a, const char *image_path) {
     }
     s.job = job;
     g_job = job;
+    loina_terminal_job(job);
     loina_status st = loina_job_run(job, &err);
+    loina_terminal_job(NULL);
     g_job = NULL;
     char *res = NULL;
     if (!st)
         res = xstrdup(loina_job_result(job));
     else
         fprintf(stderr, "%s\n", err.message);
-    free(s.buf);
+    loina_renderer_free(s.renderer);
     loina_job_free(job);
     return res;
 }
@@ -1615,7 +1746,8 @@ static char *dispatch_tool(agent_t *a, tcall_t *c) {
         return tool_list(arg_val(c, "path"));
     }
     if (!strcmp(n, "bash")) {
-        return tool_bash(arg_val(c, "command"), arg_long(arg_val(c, "timeout_sec"), 30));
+        return loina_bash_run(arg_val(c, "command"), arg_long(arg_val(c, "timeout_sec"), 3600),
+                              arg_long(arg_val(c, "refresh_sec"), 60), &g_interrupted);
     }
     if (!strcmp(n, "view_image")) {
         const char *p = arg_val(c, "path");
@@ -1671,19 +1803,70 @@ static char *dispatch_tool(agent_t *a, tcall_t *c) {
         }
         return text;
     }
-    /* bash_status/stop are ds4 background controls; this agent runs bash
-     * synchronously, so report the contract instead of hanging. */
-    if (!strcmp(n, "bash_status") || !strcmp(n, "bash_stop")) {
-        return tool_err("background bash jobs are not used; call bash with timeout_sec", NULL);
-    }
+    if (!strcmp(n, "bash_status") || !strcmp(n, "bash_stop"))
+        return loina_bash_status((int)arg_long(arg_val(c, "job"), 0),
+                                 (int)arg_long(arg_val(c, "pid"), 0),
+                                 arg_long(arg_val(c, "refresh_sec"), !strcmp(n, "bash_stop") ? 1 : 0),
+                                 !strcmp(n, "bash_stop"), &g_interrupted);
     return tool_err("unknown tool: ", n);
 }
 
-/* Run a full user task: up to 10 tool rounds, then the final answer. */
-static int run_task(agent_t *a, const char *user_text, const char *vision_path) {
+static void tool_body(const char *text, const char *prefix, const char *color, bool tty) {
+    if (!text) return;
+    while (*text) {
+        const char *end = strchr(text, '\n');
+        size_t n = end ? (size_t)(end - text) : strlen(text);
+        fprintf(stderr, "%s%s%.*s%s\n", tty ? color : "", prefix, (int)n, text, tty ? "\x1b[0m" : "");
+        text += n + (end != NULL);
+    }
+}
+
+static void tool_announce(tcall_t *call) {
+    bool tty = loina_terminal_active() || isatty(STDERR_FILENO);
+    const char *name = call->name, *path = arg_val(call, "path");
+    fprintf(stderr, "🛠️ %s", tty ? "\x1b[1;37m" : "");
+    if (!strcmp(name, "bash")) {
+        const char *command = arg_val(call, "command");
+        fprintf(stderr, "%s$ %s", tty ? LOINA_ACCENT : "", command ? command : "");
+    } else if (!strcmp(name, "read")) {
+        fprintf(stderr, "Reading %s%s%s ", tty ? "\x1b[32m" : "", path ? path : "<unknown>", tty ? "\x1b[33m" : "");
+        long start = arg_long(arg_val(call, "start_line"), 1);
+        if (arg_bool(arg_val(call, "whole"), false)) {
+            if (start == 1) fputs("(whole file)", stderr);
+            else fprintf(stderr, "%ld:EOF", start);
+        } else fprintf(stderr, "%ld:%ld", start, arg_long(arg_val(call, "max_lines"), 80));
+        fputs("...", stderr);
+    } else {
+        const char *prefix = !strcmp(name, "web_search") || !strcmp(name, "google_search") ? "google" :
+                             !strcmp(name, "web_visit") || !strcmp(name, "visit_page") ? "visit" : name;
+        fprintf(stderr, "%s %s%s", prefix, tty ? "\x1b[32m" : "", path ? path : "");
+        const char *query = arg_val(call, "query"), *url = arg_val(call, "url");
+        if (query) fprintf(stderr, "%s%s", path ? " " : "", query);
+        if (url) fputs(url, stderr);
+    }
+    fprintf(stderr, "%s\n", tty ? "\x1b[0m" : "");
+    if (!strcmp(name, "write")) tool_body(arg_val(call, "content"), "", "\x1b[34m", tty);
+    if (!strcmp(name, "edit")) {
+        tool_body(arg_val(call, "old"), "- ", "\x1b[31m", tty);
+        tool_body(arg_val(call, "new"), "+ ", "\x1b[32m", tty);
+    }
+}
+
+static bool bash_result_ok(const char *result) {
+    const char *end = strchr(result, '\n');
+    const char *state = strstr(result, "status=done");
+    const char *timeout = strstr(result, "timed_out=0");
+    return end && state && state < end && timeout && timeout < end &&
+           !strncmp(end + 1, "exit_status=0\n", strlen("exit_status=0\n"));
+}
+
+/* Keep host tools outside the app web loop and require checks after edits. */
+static int agent_task(agent_t *a, const char *user_text, const char *vision_path) {
     char *prompt = xstrdup(user_text);
     const char *vision = vision_path;
-    for (int round = 0; round < 11; round++) {
+    bool modified = false, checked = false;
+    int check_reminders = 0;
+    for (int round = 0; round < 32; round++) {
         if (g_interrupted) {
             free(prompt);
             return 130;
@@ -1735,9 +1918,7 @@ static int run_task(agent_t *a, const char *user_text, const char *vision_path) 
                 tcalls_free(&calls);
                 free(visible);
                 free(reply);
-                prompt = xstrdup("Tool error: Invalid tool format. Use <loina_tool_calls><loina_invoke name=\"...\">"
-                                 "<loina_param name=\"...\">...</loina_param></loina_invoke></loina_tool_calls> "
-                                 "with no extra parameters. Only the documented tools exist.");
+                prompt = xstrdup("Tool error: Incomplete call. Use <tool_call><function=NAME><parameter=NAME>VALUE</parameter></function></tool_call> with the supplied tools.");
                 /* feed as tool_response so the transcript stays a tool turn */
                 char *wrapped = xmalloc(strlen(prompt) + 64);
                 sprintf(wrapped, "<tool_response>\n%s\n</tool_response>", prompt);
@@ -1746,6 +1927,21 @@ static int run_task(agent_t *a, const char *user_text, const char *vision_path) 
                 continue;
             }
             if (nc == 0) {
+                if (!empty && modified && !checked && round < 31 && check_reminders++ < 2) {
+                    const char *instruction = "\nThe files have changed, but no successful check was run afterward. "
+                        "Use bash to run focused tests of the requested behavior and edge cases. "
+                        "Fix failures before finishing. Do not merely describe how the user could test it.";
+                    prompt = xmalloc(strlen(user_text) + strlen(instruction) + 32);
+                    sprintf(prompt, "Original task: %s%s", user_text, instruction);
+                    fprintf(stderr, "Verifying generated files before finishing.\n");
+                    free(visible); free(reply);
+                    continue;
+                }
+                if (modified && !checked) {
+                    fprintf(stderr, "Files were written, but the model did not run successful checks.\n");
+                    free(visible); free(reply);
+                    return 1;
+                }
                 if (empty) {
                     fprintf(stderr, "The model did not finish an answer; try again.\n");
                     free(visible);
@@ -1756,43 +1952,26 @@ static int run_task(agent_t *a, const char *user_text, const char *vision_path) 
                 free(reply);
                 return 0; /* final answer already streamed */
             }
-            /* Announce tools ds4-style, then execute. */
-            for (int i = 0; i < calls.len; i++) {
-                if (isatty(fileno(stderr)))
-                    fprintf(stderr, "\x1b[36m» %s\x1b[0m", calls.v[i].name);
-                else
-                    fprintf(stderr, "» %s", calls.v[i].name);
-                for (int j = 0; j < calls.v[i].argc; j++) {
-                    const char *vn = calls.v[i].args[j].name;
-                    if (!strcmp(vn, "path") || !strcmp(vn, "command") || !strcmp(vn, "query") || !strcmp(vn, "url"))
-                        fprintf(stderr, " %s=%.60s", vn, calls.v[i].args[j].value);
-                }
-                fputc('\n', stderr);
-            }
+            for (int i = a->streamed_tools; i < calls.len; i++) tool_announce(&calls.v[i]);
             free(visible);
         }
-        if (round == 10) {
-            fprintf(stderr, "Tool budget reached; answering from evidence so far.\n");
-            tcalls_free(&calls);
-            free(reply);
-            /* One last plain turn without tools. */
-            prompt = xstrdup("Answer the user's question directly using the available evidence. Do not call tools.");
-            char *w2 = xmalloc(strlen(prompt) + 64);
-            sprintf(w2, "<tool_response>\n%s\n</tool_response>", prompt);
-            free(prompt);
-            prompt = w2;
-            bool c2 = false;
-            char *fin = run_turn(a, prompt, NULL, &c2);
-            free(prompt);
-            free(fin);
-            tcalls_free(&calls);
-            return c2 ? 130 : 0;
+        if (round == 31) {
+            fprintf(stderr, "Tool round limit reached before the task completed.\n");
+            tcalls_free(&calls); free(reply);
+            return 1;
         }
         /* Execute and wrap observations for the MiniCPM <tool_response> path. */
         char *obs = NULL;
         size_t ol = 0, oc = 0;
         for (int i = 0; i < calls.len; i++) {
+            loina_terminal_event(LOINA_TOOL, "running tool", 0);
             char *r = dispatch_tool(a, &calls.v[i]);
+            const char *name = calls.v[i].name;
+            if ((!strcmp(name, "write") || !strcmp(name, "edit")) && strncmp(r, "Tool error:", 11)) {
+                modified = true; checked = false;
+            }
+            if (!strcmp(name, "bash") || !strcmp(name, "bash_status"))
+                checked = bash_result_ok(r);
             if (i)
                 buf_add(&obs, &ol, &oc, "\n\n", 2);
             buf_add(&obs, &ol, &oc, r, strlen(r));
@@ -1844,13 +2023,64 @@ static void hist_append(const char *line) {
     }
 }
 
+typedef struct {
+    agent_t *agent;
+    const char *text, *vision;
+} task_t;
+
+static int task_run(void *pointer) {
+    task_t *t = pointer;
+    return agent_task(t->agent, t->text, t->vision);
+}
+
+static int run_task(agent_t *agent, const char *text, const char *vision) {
+    g_interrupted=0;
+    task_t task = {.agent=agent, .text=text, .vision=vision};
+    return loina_terminal_run(task_run, &task);
+}
+
+static bool agent_prompt_yes_no(const char *prompt) {
+    char line[80];
+    for (;;) {
+        fputs(prompt,stdout);
+        fflush(stdout);
+        if (!fgets(line,sizeof(line),stdin)) { clearerr(stdin); return false; }
+        char *p=line;
+        while (*p==' ' || *p=='\t') p++;
+        if (*p=='y' || *p=='Y') return true;
+        if (*p=='n' || *p=='N') return false;
+    }
+}
+
+static bool agent_save_session(loina_session *session, size_t *saved_count) {
+    loina_error error={0};
+    if (loina_session_checkpoint(session,&error)) {
+        printf("save failed: %s\n",error.message);
+        return false;
+    }
+    *saved_count=loina_session_count(session);
+    printf("saved session %s (chat + KV)\n",loina_session_id(session));
+    return true;
+}
+
+static bool agent_maybe_save_before_exiting(loina_session *session, size_t *saved_count, bool tty) {
+    if (!tty || loina_session_count(session)==*saved_count) return true;
+    if (!agent_prompt_yes_no("Save current session? (y/n) ")) return true;
+    if (agent_save_session(session,saved_count)) return true;
+    return agent_prompt_yes_no("Continue anyway? (y/n) ");
+}
+
 int main(int argc, char **argv) {
+    /* Worker output must reach the UI pipe without waiting for a flush. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     agent_cfg_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.thinking = true;
     cfg.temp = 0.1f;
     cfg.top_p = 1.0f;
-    const char *cache_dir = ".loina";
+    char store[PATH_MAX], model_store[PATH_MAX];
+    const char *cache_dir = NULL, *model_dir = NULL;
     const char *templates_override = NULL;
     uint32_t ctx = 0;
     bool show_models = false, show_device = false;
@@ -1897,6 +2127,8 @@ int main(int argc, char **argv) {
             cfg.session_id = v;
         else if (!strcmp(a, "--cache-dir"))
             cache_dir = v;
+        else if (!strcmp(a, "--model-dir"))
+            model_dir = v;
         else if (!strcmp(a, "--templates"))
             templates_override = v;
         else if (!strcmp(a, "--vision"))
@@ -1944,7 +2176,41 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    if (cfg.chdir_path && chdir(cfg.chdir_path)) {
+    if (!cache_dir) {
+        if (!loina_storage_directory(store,sizeof(store))) {
+            fprintf(stderr,"Cannot locate the Loina data directory; use --cache-dir PATH\n");
+            return 1;
+        }
+        cache_dir=store;
+    }
+    if (!model_dir) {
+        if (!loina_storage_models(model_store,sizeof(model_store),argv[0])) {
+            fprintf(stderr,"Cannot locate model files; use --model-dir PATH\n");
+            return 1;
+        }
+        model_dir=model_store;
+    }
+    char launch[PATH_MAX], paths[7][PATH_MAX];
+    if (!getcwd(launch, sizeof(launch))) { perror("loina-agent: getcwd"); return 1; }
+    const char **arguments[] = {&cache_dir, &templates_override, &cfg.model_file,
+                               &cfg.import, &cfg.prompt_file, &cfg.vision_path, &model_dir};
+    for (size_t i = 0; i < sizeof(arguments)/sizeof(*arguments); i++) {
+        const char *value = *arguments[i];
+        if (!value || value[0] == '/') continue;
+        int n = snprintf(paths[i], sizeof(paths[i]), "%s/%s", launch, value);
+        if (n < 0 || (size_t)n >= sizeof(paths[i])) {
+            fprintf(stderr, "loina-agent: path is too long: %s\n", value);
+            return 1;
+        }
+        *arguments[i] = paths[i];
+    }
+    char workspace[] = "/tmp/loina-agent-XXXXXX";
+    if (!cfg.chdir_path && (show_models || show_device)) cfg.chdir_path = launch;
+    if (!cfg.chdir_path) {
+        if (!mkdtemp(workspace)) { perror("loina-agent: workspace"); return 1; }
+        cfg.chdir_path = workspace;
+    }
+    if (chdir(cfg.chdir_path)) {
         fprintf(stderr, "loina-agent: cannot chdir to %s\n", cfg.chdir_path);
         return 1;
     }
@@ -1976,7 +2242,9 @@ int main(int argc, char **argv) {
     if (cfg.prompt)
         cfg.non_interactive = true;
 
-    loina_config ecfg = {.directory = cache_dir, .web = agent_web, .context = ctx};
+    cfg.engine_cfg.context = ctx;
+    loina_config ecfg = {.directory=cache_dir, .model_directory=model_dir,
+        .session_directory=cache_dir, .cache_directory=cache_dir, .web=agent_web, .context=ctx};
     if (cfg.threads)
         ecfg.device.threads = cfg.threads;
     /* Agent template override: local tool protocol instead of app web text. */
@@ -1994,7 +2262,7 @@ int main(int argc, char **argv) {
             }
         }
         mkdir(tmp, 0755);
-        if (!write_agent_template(auto_tmpl)) {
+        if (!write_agent_template(auto_tmpl, cfg.edit_upto)) {
             fprintf(stderr, "loina-agent: cannot write agent templates\n");
             return 1;
         }
@@ -2095,6 +2363,13 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (!cfg.non_interactive && loina_preload(engine, LOINA_TEXT, NULL, &err)) {
+        fprintf(stderr, "%s\n", err.message);
+        loina_close(engine);
+        free(owned_prompt);
+        return 1;
+    }
+
     loina_session *session = cfg.session_id ? loina_session_load(engine, cfg.session_id, &err)
                                             : agent_new_session(engine, &err);
     if (!session) {
@@ -2103,10 +2378,13 @@ int main(int argc, char **argv) {
         free(owned_prompt);
         return 1;
     }
-    more_state_t more = {0};
+    loina_session_set_autosave(session,cfg.non_interactive);
+    size_t saved_count=cfg.session_id ? loina_session_count(session) : 0;
+    more_state_t more = {.context=ctx};
     agent_t agent = {.engine = engine, .session = session, .cfg = &cfg, .more = &more};
     int rc = 0;
     if (cfg.non_interactive) {
+        fprintf(stderr, "Working directory: %s\n", cfg.chdir_path);
         if (!cfg.prompt) {
             fprintf(stderr, "loina-agent: --non-interactive needs -p\n");
             rc = 2;
@@ -2115,153 +2393,142 @@ int main(int argc, char **argv) {
         }
     } else {
         bool tty = isatty(fileno(stdin)) != 0;
-        /* ds4-style welcome: colored name + thought-balloon instead of the
-         * whale (ds4) or crystal ball (quarkstar). */
-        char ctxs[32];
-        uint32_t eff = ctx ? ctx : 32768;
-        if (eff % 1000 == 0)
-            snprintf(ctxs, sizeof(ctxs), "%uk", eff / 1000);
-        else
-            snprintf(ctxs, sizeof(ctxs), "%.1fk", (double)eff / 1000.0);
-        if (isatty(fileno(stdout)))
-            printf("\x1b[1;97mLoina\x1b[0m \xf0\x9f\x92\xad Agent, context %s tokens\n", ctxs);
-        else
-            printf("Loina Agent, context %s tokens\n", ctxs);
-        puts("Tools run locally; web via curl bridge. /help for commands.");
-        char line[16384];
-        while (fputs(tty ? "loina> " : "", stdout), fflush(stdout), fgets(line, sizeof(line), stdin)) {
-            line[strcspn(line, "\r\n")] = 0;
-            char *cmd = line;
-            while (*cmd && isspace((unsigned char)*cmd))
-                cmd++;
-            char *e = cmd + strlen(cmd);
-            while (e > cmd && isspace((unsigned char)e[-1]))
-                *--e = 0;
-            if (!*cmd)
-                continue;
-            hist_append(cmd);
-            if (!strcmp(cmd, "/quit") || !strcmp(cmd, "/exit"))
-                break;
-            if (!strcmp(cmd, "/help")) {
-                agent_help();
-                puts("Agent tools run locally in the current directory (see --chdir).");
-                continue;
-            }
-            if (!strcmp(cmd, "/think")) {
-                cfg.thinking = true;
-                puts("Thinking on (when the package allows it).");
-                continue;
-            }
-            if (!strcmp(cmd, "/nothink")) {
-                cfg.thinking = false;
-                puts("Thinking off.");
-                continue;
-            }
-            if (!strcmp(cmd, "/save")) {
-                if (loina_session_save(session, &err))
-                    fprintf(stderr, "%s\n", err.message);
-                else
-                    puts(loina_session_id(session));
-                continue;
-            }
-            if (!strcmp(cmd, "/list")) {
-                loina_session_list(engine, list_cb, NULL, &err);
-                continue;
-            }
-            if (!strncmp(cmd, "/del ", 5)) {
-                if (loina_session_delete(engine, cmd + 5, &err))
-                    fprintf(stderr, "%s\n", err.message);
-                continue;
-            }
-            if (!strcmp(cmd, "/new") || !strncmp(cmd, "/switch ", 8)) {
-                loina_session *nx = !strcmp(cmd, "/new") ? agent_new_session(engine, &err)
-                                                         : loina_session_load(engine, cmd + 8, &err);
-                if (nx) {
-                    loina_session_free(session);
-                    session = nx;
-                    agent.session = session;
-                    memset(&more, 0, sizeof(more));
-                } else
-                    fprintf(stderr, "%s\n", err.message);
-                continue;
-            }
-            if (!strncmp(cmd, "/read ", 6)) {
-                char *rp = cmd + 6;
-                while (*rp && isspace((unsigned char)*rp))
-                    rp++;
-                if (!*rp) {
-                    fprintf(stderr, "/read needs a file path\n");
+        do {
+            bool full_ui = loina_terminal_open("Agent", ctx ? ctx : 32768, &cfg.thinking, &g_interrupted);
+            if (!full_ui) puts("Loina Agent. /help for commands.");
+            char line[16384];
+            while (full_ui ? loina_terminal_read(line, sizeof(line)) != NULL :
+                   (fputs(tty ? "loina-agent> " : "", stdout), fflush(stdout), fgets(line, sizeof(line), stdin) != NULL)) {
+                line[strcspn(line, "\r\n")] = 0;
+                char *cmd = line;
+                while (*cmd && isspace((unsigned char)*cmd))
+                    cmd++;
+                char *e = cmd + strlen(cmd);
+                while (e > cmd && isspace((unsigned char)e[-1]))
+                    *--e = 0;
+                if (!*cmd)
+                    continue;
+                if (!full_ui) hist_append(cmd);
+                if (!strcmp(cmd, "/quit") || !strcmp(cmd, "/exit"))
+                    break;
+                if (loina_terminal_command(session, cmd)) continue;
+                if (!strcmp(cmd, "/think")) {
+                    cfg.thinking = true;
+                    puts("Thinking on (when the package allows it).");
                     continue;
                 }
-                /* Image -> vision observation; text -> document turn. */
-                FILE *tf = fopen(rp, "rb");
-                bool img = false;
-                if (tf) {
-                    unsigned char mg[12] = {0};
-                    size_t nn = fread(mg, 1, 12, tf);
-                    fclose(tf);
-                    if ((nn >= 8 && !memcmp(mg, "\x89PNG\r\n\x1a\n", 8)) ||
-                        (nn >= 2 && mg[0] == 0xFF && mg[1] == 0xD8))
-                        img = true;
-                    else {
-                        const char *dot = strrchr(rp, '.');
-                        if (dot && (!strcasecmp(dot, ".png") || !strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".jpeg")))
+                if (!strcmp(cmd, "/nothink")) {
+                    cfg.thinking = false;
+                    puts("Thinking off.");
+                    continue;
+                }
+                if (!strcmp(cmd, "/save")) {
+                    agent_save_session(session,&saved_count);
+                    continue;
+                }
+                if (!strcmp(cmd, "/list")) {
+                    loina_session_list(engine, list_cb, NULL, &err);
+                    continue;
+                }
+                if (!strncmp(cmd, "/del ", 5)) {
+                    if (loina_session_delete(engine, cmd + 5, &err))
+                        fprintf(stderr, "%s\n", err.message);
+                    continue;
+                }
+                if (!strcmp(cmd, "/new") || !strncmp(cmd, "/switch ", 8)) {
+                    loina_session *nx = !strcmp(cmd, "/new") ? agent_new_session(engine, &err)
+                                                             : loina_session_load(engine, cmd + 8, &err);
+                    if (nx) {
+                        loina_session_free(session);
+                        session = nx;
+                        agent.session = session;
+                        loina_session_set_autosave(session,false);
+                        saved_count=!strcmp(cmd,"/new") ? 0 : loina_session_count(session);
+                        more = (more_state_t){.context=ctx};
+                    } else
+                        fprintf(stderr, "%s\n", err.message);
+                    continue;
+                }
+                if (!strncmp(cmd, "/read ", 6)) {
+                    char *rp = cmd + 6;
+                    while (*rp && isspace((unsigned char)*rp))
+                        rp++;
+                    if (!*rp) {
+                        fprintf(stderr, "/read needs a file path\n");
+                        continue;
+                    }
+                    /* Image -> vision observation; text -> document turn. */
+                    FILE *tf = fopen(rp, "rb");
+                    bool img = false;
+                    if (tf) {
+                        unsigned char mg[12] = {0};
+                        size_t nn = fread(mg, 1, 12, tf);
+                        fclose(tf);
+                        if ((nn >= 8 && !memcmp(mg, "\x89PNG\r\n\x1a\n", 8)) ||
+                            (nn >= 2 && mg[0] == 0xFF && mg[1] == 0xD8))
                             img = true;
+                        else {
+                            const char *dot = strrchr(rp, '.');
+                            if (dot && (!strcasecmp(dot, ".png") || !strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".jpeg")))
+                                img = true;
+                        }
                     }
-                }
-                if (img) {
-                    rc = run_task(&agent, "Describe this attached image and extract its text.", rp);
-                } else {
-                    FILE *f = fopen(rp, "rb");
-                    if (!f) {
-                        fprintf(stderr, "Cannot open %s\n", rp);
-                        continue;
-                    }
-                    fseek(f, 0, SEEK_END);
-                    long sz = ftell(f);
-                    rewind(f);
-                    if (sz < 0 || sz > 1024 * 1024) {
+                    if (img) {
+                        rc = run_task(&agent, "Describe this attached image and extract its text.", rp);
+                    } else {
+                        FILE *f = fopen(rp, "rb");
+                        if (!f) {
+                            fprintf(stderr, "Cannot open %s\n", rp);
+                            continue;
+                        }
+                        fseek(f, 0, SEEK_END);
+                        long sz = ftell(f);
+                        rewind(f);
+                        if (sz < 0 || sz > 1024 * 1024) {
+                            fclose(f);
+                            fprintf(stderr, "Text limit is 1 MB: %s\n", rp);
+                            continue;
+                        }
+                        char *d = xmalloc((size_t)sz + 1);
+                        if (sz && fread(d, 1, (size_t)sz, f) != (size_t)sz) {
+                            free(d);
+                            fclose(f);
+                            continue;
+                        }
+                        d[sz] = 0;
                         fclose(f);
-                        fprintf(stderr, "Text limit is 1 MB: %s\n", rp);
-                        continue;
-                    }
-                    char *d = xmalloc((size_t)sz + 1);
-                    if (sz && fread(d, 1, (size_t)sz, f) != (size_t)sz) {
+                        const char *b = strrchr(rp, '/');
+                        b = b ? b + 1 : rp;
+                        char *task = xmalloc((size_t)sz + strlen(b) + 64);
+                        sprintf(task, "[Document: %s]\n%s", b, d);
                         free(d);
-                        fclose(f);
-                        continue;
+                        rc = run_task(&agent, task, NULL);
+                        free(task);
                     }
-                    d[sz] = 0;
-                    fclose(f);
-                    const char *b = strrchr(rp, '/');
-                    b = b ? b + 1 : rp;
-                    char *task = xmalloc((size_t)sz + strlen(b) + 64);
-                    sprintf(task, "[Document: %s]\n%s", b, d);
-                    free(d);
-                    rc = run_task(&agent, task, NULL);
-                    free(task);
+                    if (rc == 130) {
+                        g_interrupted = 0;
+                        rc = 0;
+                    } else if (rc) {
+                        fprintf(stderr, "task failed\n");
+                        rc = 0;
+                    }
+                    continue;
                 }
-                if (rc == 130) {
+                if (cmd[0] == '/') {
+                    fprintf(stderr, "unknown command: %s\n", cmd);
+                    continue;
+                }
+                int tr = run_task(&agent, cmd, NULL);
+                if (tr == 130) {
                     g_interrupted = 0;
-                    rc = 0;
-                } else if (rc) {
+                } else if (tr) {
                     fprintf(stderr, "task failed\n");
-                    rc = 0;
                 }
-                continue;
             }
-            if (cmd[0] == '/') {
-                fprintf(stderr, "unknown command: %s\n", cmd);
-                continue;
-            }
-            int tr = run_task(&agent, cmd, NULL);
-            if (tr == 130) {
-                g_interrupted = 0;
-            } else if (tr) {
-                fprintf(stderr, "task failed\n");
-            }
-        }
+            loina_terminal_close();
+        } while (!agent_maybe_save_before_exiting(session,&saved_count,tty));
     }
+    loina_bash_cleanup();
     loina_session_free(session);
     loina_close(engine);
     free(owned_prompt);

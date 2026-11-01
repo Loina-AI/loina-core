@@ -265,7 +265,7 @@
             {{- render_tool_response("" if message.get("content") is none else message.get("content")) -}}
         {%- endif -%}
         {{- "<|im_end|>\n" -}}
-        {%- if (loop.last or _next.role != "tool") and ns.user_query -%}
+        {%- if (loop.last or _next.role != "tool") and ns.user_query and not (external_tools | default(false)) -%}
             {#- Keep tool evidence from displacing the question and its language. -#}
             {{- "<|im_start|>user\n" + ns.user_query + "<|im_end|>\n" -}}
         {%- endif -%}

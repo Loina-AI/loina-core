@@ -15,7 +15,7 @@ static bool cache_paths(loina_engine *e, loina_session *s, char *state, char *st
     int n=snprintf(config,sizeof(config),"loina-%d-chat8:ctx-%u:backend-%u:k-q8_0:v-q4_0",LOINA_ABI,e->config.context,e->selected_backend);
     loina_sha_update(&hash,config,(size_t)n);
     loina_sha_final(&hash,key);
-    if (!loina_path(dir,e->directory,"cache",key) || !loina_mkdir(dir)) return false;
+    if (!loina_path(dir,e->cache_directory,key,NULL) || !loina_mkdir(dir)) return false;
     snprintf(name,sizeof(name),"%s.kv",s->id);
     if (!loina_path(state,dir,name,NULL)) return false;
     snprintf(name,sizeof(name),"%s.stamp",s->id);
@@ -39,7 +39,7 @@ bool loina_cache_save(loina_engine *e, loina_session *s) {
     char state[LOINA_PATH],stamp[LOINA_PATH],tmp[LOINA_PATH],meta[LOINA_PATH],text_hash[65],state_hash[65];
     transcript_hash(s,text_hash);
     strcpy(e->cache_session,s->id);strcpy(e->cache_transcript,text_hash);
-    if (!e->runtime->save || !cache_paths(e,s,state,stamp)) return false;
+    if (s->manual_save || !e->runtime->save || !cache_paths(e,s,state,stamp)) return false;
     if (snprintf(tmp,sizeof(tmp),"%s.tmp",state)>=(int)sizeof(tmp) ||
         snprintf(meta,sizeof(meta),"%s.tmp",stamp)>=(int)sizeof(meta)) return false;
     if (!e->runtime->save(e->model,tmp) || loina_hash_file(tmp,state_hash,NULL,NULL)) { remove(tmp);return false; }
@@ -68,4 +68,29 @@ bool loina_cache_restore(loina_engine *e, loina_session *s) {
     if (!e->runtime->restore(e->model,state)) return false;
     strcpy(e->cache_session,s->id);strcpy(e->cache_transcript,want);
     return true;
+}
+
+loina_status loina_session_checkpoint(loina_session *s, loina_error *error) {
+    if (!s || s->temporary) return loina_fail(error,LOINA_INVALID,"Session cannot be persisted");
+    loina_engine *e=s->engine;
+    if (atomic_exchange(&e->busy,true)) return loina_fail(error,LOINA_BUSY,"Engine is busy");
+    loina_status status=LOINA_OK;
+    char hash[65];
+    transcript_hash(s,hash);
+    if (e->model && e->runtime && (strcmp(e->cache_session,s->id) || strcmp(e->cache_transcript,hash)))
+        loina_cache_restore(e,s);
+    if (!e->model || !e->runtime || !e->runtime->save || strcmp(e->cache_session,s->id) ||
+        strcmp(e->cache_transcript,hash)) {
+        status=loina_fail(error,LOINA_INVALID,"No current KV checkpoint; complete a chat turn before saving");
+    } else {
+        status=loina_session_save(s,error);
+        if (!status) {
+            bool manual=s->manual_save;
+            s->manual_save=false;
+            if (!loina_cache_save(e,s)) status=loina_fail(error,LOINA_IO,"Cannot save KV checkpoint");
+            s->manual_save=manual;
+        }
+    }
+    atomic_store(&e->busy,false);
+    return status;
 }

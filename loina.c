@@ -49,12 +49,22 @@ loina_engine *loina_open(const loina_config *c, loina_error *error) {
     atomic_init(&e->busy,false);
     if (!loina_mkdir(e->directory)) { loina_fail(error,LOINA_IO,"Cannot create storage directory"); free(e); return NULL; }
     const char *dirs[]={"packages","sessions","cache","outputs"};
-    char path[LOINA_PATH];
-    for (size_t i=0;i<sizeof(dirs)/sizeof(*dirs);i++) {
-        if (!loina_path(path,e->directory,dirs[i],NULL) || !loina_mkdir(path)) {
-            loina_fail(error,LOINA_IO,"Cannot create %s directory",dirs[i]); free(e); return NULL;
+    const char *overrides[]={c->model_directory,c->session_directory,c->cache_directory,NULL};
+    char output[LOINA_PATH];
+    char *paths[]={e->model_directory,e->session_directory,e->cache_directory,output};
+    for (size_t i=0;i<4;i++) {
+        bool valid;
+        if (overrides[i]) {
+            int n=snprintf(paths[i],LOINA_PATH,"%s",overrides[i]);
+            valid=n>0 && n<LOINA_PATH-512;
+        } else valid=loina_path(paths[i],e->directory,dirs[i],NULL);
+        if (!valid || !loina_mkdir(paths[i])) {
+            loina_fail(error,LOINA_IO,"Cannot create %s directory",dirs[i]);free(e);return NULL;
         }
     }
+    if (c->model_directory) e->config.model_directory=e->model_directory;
+    e->config.session_directory=e->session_directory;
+    e->config.cache_directory=e->cache_directory;
     if (loina_packages_upgrade(e,error)) { free(e);return NULL; }
     loina_device d;
     loina_device_probe(e->directory,&d,NULL);
@@ -152,6 +162,11 @@ loina_job *loina_job_create(loina_engine *e, const loina_request *r, loina_event
     loina_job *j=calloc(1,sizeof(*j));
     if (!j) { loina_fail(error,LOINA_MEMORY,"Cannot allocate job"); return NULL; }
     j->engine=e;j->request=*r;j->event=event;j->user=user;
+    if (r->tool_schema) {
+        j->tool_schema=loina_strdup(r->tool_schema);
+        if (!j->tool_schema) { loina_job_free(j);loina_fail(error,LOINA_MEMORY,"Cannot copy tool schema");return NULL; }
+    }
+    j->request.tool_schema=j->tool_schema;
     j->prompt=loina_strdup(r->prompt);j->input=loina_strdup(r->input_path);j->output=loina_strdup(r->output_path);
     if (!j->prompt || !j->input || !j->output) { loina_job_free(j);loina_fail(error,LOINA_MEMORY,"Cannot copy request");return NULL; }
     j->request.prompt=j->prompt;j->request.input_path=j->input;j->request.output_path=j->output;
@@ -168,7 +183,7 @@ void loina_job_progress(loina_job *j, uint64_t done, uint64_t total) {
 const char *loina_job_result(const loina_job *j) { return j && j->result ? j->result : ""; }
 void loina_job_free(loina_job *j) {
     if (!j) return;
-    free(j->prompt);free(j->input);free(j->output);free(j->result);free(j);
+    free(j->prompt);free(j->input);free(j->output);free(j->result);free(j->tool_schema);free(j);
 }
 loina_status loina_job_run(loina_job *j, loina_error *error) {
     if (!j || j->ran) return loina_fail(error,LOINA_INVALID,"A job can run only once");

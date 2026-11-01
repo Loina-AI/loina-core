@@ -1,0 +1,73 @@
+/* Tool contracts and native Qwen prompt from ds4_agent.c (MIT; licenses/ds4.txt). */
+static const char agent_tool_schema[] =
+    "[\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"google_search\",\"description\":\"Search web pages.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"visit_page\",\"description\":\"Read a URL in browser.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}},\"required\":[\"url\"]}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"bash\",\"description\":\"Run a shell command.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout_sec\":{\"type\":\"integer\"},\"refresh_sec\":{\"type\":\"integer\"}},\"required\":[\"command\"]}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"bash_status\",\"description\":\"Check a bash job.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"job\":{\"type\":\"integer\"},\"pid\":{\"type\":\"integer\"},\"refresh_sec\":{\"type\":\"integer\"}},\"required\":[\"job\"]}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"bash_stop\",\"description\":\"Stop a bash job.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"job\":{\"type\":\"integer\"},\"pid\":{\"type\":\"integer\"},\"refresh_sec\":{\"type\":\"integer\"}},\"required\":[\"job\"]}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a text file/range.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"start_line\":{\"type\":\"integer\"},\"max_lines\":{\"type\":\"integer\"},\"whole\":{\"type\":\"boolean\"},\"raw\":{\"type\":\"boolean\"}},\"required\":[\"path\"]}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"more\",\"description\":\"Continue previous read-like output.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\"}}}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"write\",\"description\":\"Create or overwrite a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"]}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"edit\",\"description\":\"Replace one exact old text match.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"old\":{\"type\":\"string\"},\"new\":{\"type\":\"string\"}},\"required\":[\"path\",\"old\",\"new\"]}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"search\",\"description\":\"Search files.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"mode\":{\"type\":\"string\",\"enum\":[\"literal\",\"regex\"]},\"glob\":{\"type\":\"string\"},\"context\":{\"type\":\"integer\"},\"max_results\":{\"type\":\"integer\"},\"case_sensitive\":{\"type\":\"boolean\"}},\"required\":[\"query\"]}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"list\",\"description\":\"List one directory.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}},\n"
+    "{\"type\":\"function\",\"function\":{\"name\":\"view_image\",\"description\":\"Open a local PNG or JPEG as a visual observation.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}}\n"
+    "]"
+    ;
+
+static const char agent_system_jinja[] =
+    "You are a coding agent running in a local workspace. Use tools for local file and system work. Avoid printing large file contents or large code blocks as answers; create or edit files with tools, then summarize results briefly.\n"
+    "\n"
+    "Today is {{ date }}. Working directory: {{ working_directory }}.\n"
+    "\n"
+    "Read output is limited to 128 KiB. Use more to continue, including within an oversized line; whole=true fails rather than returning an excerpt. raw=true omits line numbers but still reports truncation.\n"
+    "Search mode is literal (default) or regex (POSIX extended). Defaults: path=., case_sensitive=true, context=0, max_results=50. context is 0-5, max_results is 1-500. The search skips .git and nested symlinks, and reports incomplete coverage.\n"
+    "bash timeout_sec defaults to 3600; refresh_sec defaults to 60 and waits up to that many seconds. bash_status returns immediately unless refresh_sec is given. Jobs keep running and timeouts remain active between calls.\n"
+    "Write and edit replace complete files atomically, follow existing symlink targets, and reject hard-linked files.\n"
+    "\n"
+    "Inside string values only, escape a literal </parameter> as &lt;/parameter>. To write that escaped spelling literally, use &amp;lt;/parameter>. Other HTML entities are unchanged.\n"
+    "\n"
+    "If you choose to call a function ONLY reply in the following format with NO suffix:\n"
+    "\n"
+    "<tool_call>\n"
+    "<function=example_function_name>\n"
+    "<parameter=example_parameter_1>\n"
+    "value_1\n"
+    "</parameter>\n"
+    "<parameter=example_parameter_2>\n"
+    "This is the value for the second parameter\n"
+    "that can span\n"
+    "multiple lines\n"
+    "</parameter>\n"
+    "</function>\n"
+    "</tool_call>\n"
+    "\n"
+    "<IMPORTANT>\n"
+    "Reminder:\n"
+    "- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n"
+    "- Required parameters MUST be specified\n"
+    "- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n"
+    "- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n"
+    "</IMPORTANT>\n"
+    "\n"
+    "Tool calls are not allowed inside <think></think>; finish thinking before emitting <tool_call>.\n"
+    "\n"
+    "# Rules\n"
+    "\n"
+    "- read path alone returns a context-sized bounded chunk, not the whole file; for first looks at large files, prefer max_lines around 80-160.\n"
+    "- If read says more lines are available, call more with count=<lines> to read the next chunk.\n"
+    "- Use whole=true only when the user explicitly asks for the complete file contents or when bounded chunks are insufficient for the task; add raw=true only when line numbers would corrupt the payload.\n"
+    "- When editing files, state the target filename before the edit; for the edit tool, put path first.\n"
+    ;
+
+static const char agent_edit_exact[] =
+    "- Use edit with exact old text and replacement new text; old must match exactly once.\n"
+    ;
+static const char agent_edit_upto[] =
+    "- Use edit with exact old text and replacement new text; old may contain one [upto] marker between unique anchors.\n"
+    ;
+static const char agent_rules_tail[] =
+    "- For long bash jobs, pass refresh_sec and then poll with bash_status or stop with bash_stop.\n"
+    "- Preserve the current system configuration unless the user explicitly asks otherwise.\n"
+    ;

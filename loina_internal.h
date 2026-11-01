@@ -24,6 +24,7 @@ typedef struct {
 struct loina_engine {
     loina_config config;
     char directory[LOINA_PATH];
+    char model_directory[LOINA_PATH], session_directory[LOINA_PATH], cache_directory[LOINA_PATH];
     char template_directory[LOINA_PATH], chat_identity[65];
     const loina_runtime *runtime;
     const loina_package *package;
@@ -34,7 +35,7 @@ struct loina_engine {
 };
 struct loina_session {
     loina_engine *engine;
-    bool temporary;
+    bool temporary, manual_save;
     char id[128];
     char package_id[256];
     loina_message *messages;
@@ -45,7 +46,7 @@ struct loina_job {
     loina_request request;
     loina_event_fn event;
     void *user;
-    char *prompt, *input, *output, *result;
+    char *prompt, *input, *output, *result, *tool_schema;
     atomic_bool cancelled;
     struct loina_job *parent;
     bool ran;

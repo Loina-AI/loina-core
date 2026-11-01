@@ -230,7 +230,7 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
     loina_status status=LOINA_OK;
     if (r->feature==LOINA_VISION && !temporary) {
         loina_request vr=*r;
-        vr.session=NULL;vr.tools=false;vr.thinking=false;
+        vr.session=NULL;vr.tools=false;vr.thinking=false;vr.tool_schema=NULL;vr.tool_response=false;
         vr.prompt="Describe this image and extract its visible text faithfully. Include details needed to answer questions about it.";
         loina_job *vision=loina_job_create(e,&vr,extraction_event,job,error);
         if (!vision) { status=error ? error->code : LOINA_MEMORY;goto done; }
@@ -267,12 +267,16 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
     if (!e->runtime->chat) { status=loina_fail(error,LOINA_UNSUPPORTED,"Runtime does not implement chat");goto done; }
     if (!s->package_id[0]) strcpy(s->package_id,p->id);
     if (!temporary) loina_cache_restore(e,s);
-    if (!loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,prompt)) { status=loina_fail(error,LOINA_MEMORY,"Cannot append message");goto done; }
+    if (!loina_session_add(s,r->tool_response ? LOINA_TOOL_RESULT : LOINA_USER,LOINA_MESSAGE_TEXT,prompt)) { status=loina_fail(error,LOINA_MEMORY,"Cannot append message");goto done; }
     /* Keep useful evidence through errors and reserve a final inference pass
      * without tools. Repeated navigation must not replace the answer. */
     int requests=0,searches=0,failures=0;
     for (int round=0;round<6;round++) {
         if (round==5) { r->tools=false;r->thinking=false; }
+        if (r->tool_schema) {
+            status=e->runtime->chat(e->model,s,job,&reply,error);
+            break;
+        }
         chat_stream stream={.event=job->event,.user=job->user};
         job->event=chat_event;job->user=&stream;
         status=e->runtime->chat(e->model,s,job,&reply,error);
@@ -341,7 +345,7 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
     if (!status && loina_job_cancelled(job)) status=loina_fail(error,LOINA_CANCELLED,"Chat cancelled");
     if (!status && !loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,reply ? reply : "")) status=loina_fail(error,LOINA_MEMORY,"Cannot retain reply");
     if (!status && !temporary) {
-        status=loina_session_save(s,error);
+        if (!s->manual_save) status=loina_session_save(s,error);
         if (!status && feature==LOINA_TEXT) loina_cache_save(e,s);
     }
     if (!status) { job->result=reply;reply=NULL; }

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #ifndef LOINA_LLAMA_REVISION
 #define LOINA_LLAMA_REVISION "unknown"
@@ -77,6 +78,8 @@ static bool abort_decode(void *user) { return loina_job_cancelled(((llama_state 
 extern void ggml_log_callback_default(enum ggml_log_level level, const char * text, void * user_data);
 static void llama_quiet(enum ggml_log_level level, const char *text, void *user) {
     (void)user;
+    /* The full-size cache notice describes a supported configuration. */
+    if (strstr(text, "llama_kv_cache_iswa: using full-size SWA cache")) return;
     if (level == GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_ERROR) {
         fputs(text, stderr);
         fflush(stderr);
@@ -219,9 +222,19 @@ static char *render(llama_state *state, loina_session *session, loina_job *job, 
         strftime(date,sizeof(date),"%Y-%m-%d",today);
         strftime(local_date,sizeof(local_date),"%Y-%m-%d (%A, UTC%z)",today);
     }
-    snprintf(context,sizeof(context),"{\"date\":\"%s\",\"local_date\":\"%s\",\"tools\":%s}",
-        date,local_date,job->request.tools ? "true" : "false");
-    char *system=llama_jinja_render(state->system_template,context,message,sizeof(message));
+    snprintf(context,sizeof(context),"{\"date\":\"%s\",\"local_date\":\"%s\",\"tools\":%s",
+        date,local_date,(job->request.tools || job->request.tool_schema) ? "true" : "false");
+    loina_buffer variables={0};
+    bool valid=loina_buffer_puts(&variables,context);
+    if (job->request.tool_schema) {
+        char directory[LOINA_PATH];
+        valid=valid && getcwd(directory,sizeof(directory)) &&
+            loina_buffer_puts(&variables,",\"working_directory\":") && loina_buffer_json(&variables,directory);
+    }
+    valid=valid && loina_buffer_puts(&variables,"}");
+    if (!valid) { free(variables.data);loina_fail(error,LOINA_MEMORY,"Cannot retain system context");return NULL; }
+    char *system=llama_jinja_render(state->system_template,variables.data,message,sizeof(message));
+    free(variables.data);
     if (!system) { loina_fail(error,LOINA_UNSUPPORTED,"Cannot render system template: %s",message);return NULL; }
     const struct llama_vocab *vocab=llama_model_get_vocab(state->model);
     char *bos=special_token(vocab,llama_vocab_bos(vocab)),*eos=special_token(vocab,llama_vocab_eos(vocab));
@@ -230,7 +243,8 @@ static char *render(llama_state *state, loina_session *session, loina_job *job, 
         loina_buffer_puts(&b,",\"eos_token\":") && loina_buffer_json(&b,eos) &&
         loina_buffer_puts(&b,",\"add_generation_prompt\":true,\"enable_thinking\":") &&
         loina_buffer_puts(&b,job->request.thinking ? "true" : "false") &&
-        loina_buffer_puts(&b,",\"tools\":") && loina_buffer_puts(&b,job->request.tools ? state->tools : "[]") &&
+        loina_buffer_puts(&b,",\"external_tools\":") && loina_buffer_puts(&b,job->request.tool_schema ? "true" : "false") &&
+        loina_buffer_puts(&b,",\"tools\":") && loina_buffer_puts(&b,job->request.tool_schema ? job->request.tool_schema : job->request.tools ? state->tools : "[]") &&
         loina_buffer_puts(&b,",\"messages\":[{\"role\":\"system\",\"content\":") &&
         loina_buffer_json(&b,system) && loina_buffer_puts(&b,"}");
     free(system);free(bos);free(eos);
@@ -250,7 +264,7 @@ static char *render(llama_state *state, loina_session *session, loina_job *job, 
     }
     ok=ok && loina_buffer_puts(&b,"]}");
     if (!ok) { free(b.data);loina_fail(error,LOINA_MEMORY,"Cannot retain template context");return NULL; }
-    llama_jinja *tmpl=job->request.tools && state->tool_template ? state->tool_template : state->chat_template;
+    llama_jinja *tmpl=(job->request.tools || job->request.tool_schema) && state->tool_template ? state->tool_template : state->chat_template;
     char *prompt=llama_jinja_render(tmpl,b.data,message,sizeof(message));
     free(b.data);
     if (!prompt) { loina_fail(error,LOINA_UNSUPPORTED,"Cannot render chat template: %s",message);return NULL; }
@@ -283,9 +297,9 @@ static void llama_reset(void *pointer) {
 static void metrics(llama_state *s, loina_job *job, size_t prompt_tokens, int64_t prompt_us,
                     uint32_t decoded, int64_t decode_us) {
     char text[224];
-    int n=snprintf(text,sizeof(text),"{\"prefill\":%.2f,\"decode\":%.2f,\"backend\":%u,\"context\":%zu,\"capacity\":%u}",
+    int n=snprintf(text,sizeof(text),"{\"prefill\":%.2f,\"decode\":%.2f,\"backend\":%u,\"context\":%zu,\"capacity\":%u,\"generated\":%u}",
         prompt_us>0 ? prompt_tokens*1000000.0/prompt_us : 0,
-        decode_us>0 ? decoded*1000000.0/decode_us : 0,s->backend,s->count,s->context_size);
+        decode_us>0 ? decoded*1000000.0/decode_us : 0,s->backend,s->count,s->context_size,decoded);
     loina_emit(job,LOINA_METRICS,text,(size_t)n,0);
 }
 static loina_status llama_chat_run(void *pointer, loina_session *session, loina_job *job, char **result, loina_error *error) {

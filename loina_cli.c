@@ -1,4 +1,7 @@
 #include "loina.h"
+#include "loina_terminal.h"
+#include "loina_renderer.h"
+#include "loina_storage.h"
 #include <ctype.h>
 #include <errno.h>
 #include <signal.h>
@@ -27,104 +30,38 @@ static void on_signal(int signal) { (void)signal; interrupted = 1; }
 
 typedef struct {
     loina_job *job;
+    loina_renderer *renderer;
     FILE *out;
     bool use_color;
-    bool in_think;
-    bool color_open;
     bool last_newline;
-    char pending[16];
-    size_t pending_len;
     double prefill, decode;
     bool have_metrics;
     int last_progress;
 } cli_stream;
 
-static bool has_prefix(const char *p, size_t n, const char *s) {
-    size_t m = strlen(s);
-    return n >= m && !memcmp(p, s, m);
-}
-
-static bool partial_prefix(const char *p, size_t n, const char *s) {
-    size_t m = strlen(s);
-    return n < m && !memcmp(s, p, n);
-}
-
-static void printer_grey(cli_stream *s) {
-    if (s->use_color && !s->color_open) {
-        fputs("\x1b[90m", s->out);
-        s->color_open = true;
-    }
-}
-
 static void printer_reset(cli_stream *s) {
-    if (s->use_color && s->color_open) {
-        fputs("\x1b[0m", s->out);
-        s->color_open = false;
-    }
-}
-
-static void printer_char(cli_stream *s, char c) {
-    if (s->in_think)
-        printer_grey(s);
-    fputc((unsigned char)c, s->out);
-    s->last_newline = (c == '\n');
+    loina_renderer_free(s->renderer);
+    s->renderer = NULL;
 }
 
 static void printer_process(cli_stream *s, const char *text, size_t n, bool finish) {
-    /* Strip <think> markers like ds4: reasoning shows grey, the answer plain.
-     * Tokens may split a marker, so hold a trailing '<' run across calls. */
-    size_t total = s->pending_len + n;
-    char *buf = malloc(total ? total : 1);
-    if (!buf)
-        return;
-    if (s->pending_len)
-        memcpy(buf, s->pending, s->pending_len);
-    if (n)
-        memcpy(buf + s->pending_len, text, n);
-    s->pending_len = 0;
-    size_t i = 0;
-    while (i < total) {
-        const char *cur = buf + i;
-        size_t rem = total - i;
-        if (has_prefix(cur, rem, "<think>")) {
-            s->in_think = true;
-            i += 7;
-            continue;
-        }
-        if (has_prefix(cur, rem, "</think>")) {
-            s->in_think = false;
-            printer_reset(s);
-            if (!s->last_newline) {
-                fputc('\n', s->out);
-                s->last_newline = true;
-            }
-            i += 8;
-            continue;
-        }
-        if (!finish && cur[0] == '<' &&
-            (partial_prefix(cur, rem, "<think>") || partial_prefix(cur, rem, "</think>"))) {
-            if (rem < sizeof(s->pending)) {
-                memcpy(s->pending, cur, rem);
-                s->pending_len = rem;
-            }
-            break;
-        }
-        printer_char(s, cur[0]);
-        i++;
-    }
-    free(buf);
+    if (!s->renderer) s->renderer = loina_renderer_new(s->use_color);
+    loina_renderer_feed(s->renderer, text, n);
+    if (finish) loina_renderer_finish(s->renderer);
+    s->last_newline = loina_renderer_last_nl(s->renderer);
 }
 
 static void event_cb(void *user, loina_event type, const char *text, size_t bytes, int progress) {
     cli_stream *s = user;
+    loina_terminal_event(type, text, progress);
     if (interrupted && s->job)
         loina_job_cancel(s->job);
     if (type == LOINA_TOKEN) {
         printer_process(s, text, bytes, false);
         fflush(s->out);
-    } else if (type == LOINA_LOADING) {
+    } else if (type == LOINA_LOADING && !loina_terminal_active()) {
         fprintf(stderr, "Loading %.*s\n", (int)bytes, text);
-    } else if (type == LOINA_PROGRESS) {
+    } else if (type == LOINA_PROGRESS && !loina_terminal_active()) {
         /* Prefill / copy progress. Overwrite one stderr line on ttys. */
         if (isatty(fileno(stderr))) {
             fprintf(stderr, "\rprogress %d%%\x1b[K", progress);
@@ -686,6 +623,7 @@ static void help(void) {
          "  -m FILE               Use a catalog model file (import siblings if needed)\n"
          "  --package ID          Use an immutable package from --models\n"
          "  --import DIRECTORY    Install selected package from local artifacts\n"
+         "  --download TARGET     Install chat, vision, speech, image, all, or a package ID\n"
          "  --models              List packages, licenses and installation state\n"
          "  --device              Show core device selection capabilities\n"
          "  --ctx N               Context size, maximum 32768 (default 32768)\n"
@@ -698,7 +636,8 @@ static void help(void) {
          "  --top-p F --min-p F   Sampling filters\n"
          "  --seed N              Sampling seed\n"
          "  --session ID          Resume a saved conversation\n"
-         "  --cache-dir PATH      Packages, transcripts and KV (default .loina)\n"
+         "  --model-dir PATH      Model files (default gguf/ beside the executable)\n"
+         "  --cache-dir PATH      Sessions and KV (default ~/.loina/kvcache)\n"
          "  --templates PATH      Override bundled Jinja templates and tools.json\n"
          "  --vision FILE         Read an image through the vision layer\n"
          "  --generate --out FILE Generate a Sana Sprint PNG (default 1024x1024, two steps)\n"
@@ -814,15 +753,14 @@ static void history_append(const char *line) {
     fclose(f);
 }
 
-static int run(loina_engine *engine, loina_request *request, loina_error *error) {
-    interrupted = 0;
-    cli_stream stream = {.out = stdout, .use_color = isatty(fileno(stdout)) != 0, .last_newline = true, .last_progress = -1};
+static int run_job(loina_engine *engine, loina_request *request, loina_error *error) {
+    cli_stream stream = {.out = stdout, .use_color = loina_terminal_active() || isatty(fileno(stdout)), .last_newline = true, .last_progress = -1};
     /* ds4-style thinking starts grey when the package reasons. */
-    stream.in_think = false;
     loina_job *job = loina_job_create(engine, request, event_cb, &stream, error);
     if (!job)
         return 1;
     stream.job = job;
+    loina_terminal_job(job);
     loina_status status = loina_job_run(job, error);
     printer_process(&stream, NULL, 0, true);
     printer_reset(&stream);
@@ -833,7 +771,7 @@ static int run(loina_engine *engine, loina_request *request, loina_error *error)
     } else if (!status) {
         if (!stream.last_newline)
             putchar('\n');
-        if (stream.have_metrics) {
+        if (stream.have_metrics && !loina_terminal_active()) {
             bool ttyerr = isatty(fileno(stderr)) != 0;
             fprintf(stderr, "%sloina: prefill: %.2f t/s, generation: %.2f t/s%s\n",
                 ttyerr ? "\x1b[32m" : "", stream.prefill, stream.decode, ttyerr ? "\x1b[0m" : "");
@@ -843,15 +781,56 @@ static int run(loina_engine *engine, loina_request *request, loina_error *error)
         interrupted = 0;
         fprintf(stderr, "Interrupted.\n");
     }
+    loina_terminal_job(NULL);
     loina_job_free(job);
     return status ? 1 : 0;
 }
 
+typedef struct {
+    loina_engine *engine;
+    loina_request *request;
+    loina_error *error;
+} cli_task;
+
+static int run_callback(void *pointer) {
+    cli_task *t = pointer;
+    return run_job(t->engine, t->request, t->error);
+}
+
+static int run(loina_engine *engine, loina_request *request, loina_error *error) {
+    interrupted=0;
+    cli_task task = {.engine=engine, .request=request, .error=error};
+    return loina_terminal_run(run_callback, &task);
+}
+
+static int download_models(loina_engine *engine, const char *target, const char *import, loina_error *error) {
+    loina_feature feature=!strcmp(target,"chat") ? LOINA_TEXT : !strcmp(target,"vision") ? LOINA_VISION :
+                          !strcmp(target,"speech") ? LOINA_SPEECH : !strcmp(target,"image") ? LOINA_IMAGE : 0;
+    bool all=!strcmp(target,"all"), found=false;
+    for (size_t i=0; i<loina_catalog_count(); i++) {
+        const loina_package *p=loina_catalog_get(i);
+        if (!all && p->feature!=feature && strcmp(p->id,target)) continue;
+        found=true;
+        printf("%s\n",p->name);
+        if (loina_install(engine,p,import,NULL,error)) {
+            fprintf(stderr,"%s\n",error->message);
+            return 1;
+        }
+        printf("Installed %s\n",p->id);
+    }
+    if (!found) fprintf(stderr,"Unknown download target: %s\n",target);
+    return found ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
-    loina_config config = {.directory = ".loina", .web = cli_web};
+    /* Worker output must reach the UI pipe without waiting for a flush. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    char store[4096], model_store[4096];
+    loina_config config = {.web = cli_web, .fetch=loina_storage_fetch, .user=(void *)&interrupted};
     loina_request request = loina_request_default(LOINA_TEXT);
     const char *package_id = NULL, *model_file = NULL, *import = NULL, *session_id = NULL, *prompt = NULL,
-               *prompt_file = NULL;
+               *prompt_file = NULL, *download = NULL;
     char *prompt_owned = NULL;
     bool models = false, device = false, n_set = false, tools_on = true;
     unsigned backend = 0;
@@ -890,10 +869,14 @@ int main(int argc, char **argv) {
             model_file = v;
         else if (!strcmp(a, "--import"))
             import = v;
+        else if (!strcmp(a, "--download"))
+            download = v;
         else if (!strcmp(a, "--session"))
             session_id = v;
         else if (!strcmp(a, "--cache-dir"))
             config.directory = v;
+        else if (!strcmp(a, "--model-dir"))
+            config.model_directory = v;
         else if (!strcmp(a, "--templates"))
             config.template_directory = v;
         else if (!strcmp(a, "--ctx")) {
@@ -958,6 +941,22 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
+    if (!config.directory) {
+        if (!loina_storage_directory(store,sizeof(store))) {
+            fprintf(stderr,"Cannot locate the Loina data directory; use --cache-dir PATH\n");
+            return 1;
+        }
+        config.directory=store;
+    }
+    if (!config.model_directory) {
+        if (!loina_storage_models(model_store,sizeof(model_store),argv[0])) {
+            fprintf(stderr,"Cannot locate model files; use --model-dir PATH\n");
+            return 1;
+        }
+        config.model_directory=model_store;
+    }
+    config.session_directory=config.directory;
+    config.cache_directory=config.directory;
     if (prompt && prompt_file) {
         fprintf(stderr, "Specify only one of -p and --prompt-file\n");
         return 1;
@@ -988,6 +987,10 @@ int main(int argc, char **argv) {
         return 1;
     }
     int exitcode = 0;
+    if (download) {
+        exitcode=download_models(engine,download,import,&error);
+        goto done;
+    }
     if (package_id) {
         request.package = loina_catalog_find(package_id);
         if (!request.package) {
@@ -1083,8 +1086,18 @@ int main(int argc, char **argv) {
     } else {
         char line[16384];
         bool tty = isatty(fileno(stdin)) != 0;
-        puts("Loina. /help for commands.");
-        while (fputs(tty ? "loina> " : "", stdout), fflush(stdout), fgets(line, sizeof(line), stdin)) {
+        if (request.feature != LOINA_IMAGE && loina_preload(engine, LOINA_TEXT, NULL, &error)) {
+            fprintf(stderr, "%s\n", error.message);
+            exitcode = 1;
+            loina_session_free(request.session);
+            goto done;
+        }
+        bool full_ui = loina_terminal_open("Chat", config.context ? config.context : 32768,
+                                            &request.thinking, &interrupted);
+        if (!full_ui) puts("Loina Chat. /help for commands.");
+        while (full_ui ? loina_terminal_read(line, sizeof(line)) != NULL :
+               (fputs(tty ? "loina> " : "", stdout), fflush(stdout), fgets(line, sizeof(line), stdin) != NULL)) {
+            if (!n_set) request.max_tokens = request.thinking ? 2048 : 1024;
             line[strcspn(line, "\r\n")] = 0;
             char *cmd = line;
             while (*cmd && isspace((unsigned char)*cmd))
@@ -1094,13 +1107,10 @@ int main(int argc, char **argv) {
                 *--end = 0;
             if (!*cmd)
                 continue;
-            history_append(cmd);
+            if (!full_ui) history_append(cmd);
             if (!strcmp(cmd, "/quit") || !strcmp(cmd, "/exit"))
                 break;
-            if (!strcmp(cmd, "/help")) {
-                help();
-                continue;
-            }
+            if (loina_terminal_command(request.session, cmd)) continue;
             if (!strcmp(cmd, "/think")) {
                 request.thinking = true;
                 if (!n_set)
@@ -1225,6 +1235,7 @@ int main(int argc, char **argv) {
     }
     loina_session_free(request.session);
 done:
+    loina_terminal_close();
     loina_close(engine);
     free(prompt_owned);
     return exitcode;

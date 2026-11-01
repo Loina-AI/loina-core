@@ -2,11 +2,12 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define check(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while (0)
 static int loaded,unloaded,restored,reset_count,web_calls,tool_chat,tool_step;
 static bool thinking_live, migrating;
-static bool thinking_requested;
+static bool thinking_requested, fail_save;
 static unsigned backends(void) { return LOINA_CPU|LOINA_VULKAN|LOINA_OPENCL; }
 static void *load(loina_engine *e, const loina_package *p, loina_job *j, loina_error *error) {
     (void)e;(void)p;(void)j;(void)error;loaded++;return malloc(1);
@@ -15,6 +16,15 @@ static void unload(void *p) { unloaded++;free(p); }
 static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, loina_error *error) {
     (void)p;(void)error;
     thinking_requested=j->request.thinking;
+    if (j->request.tool_schema) {
+        check(strstr(j->request.tool_schema, "write"));
+        check(s->messages[s->count-1].role==(j->request.tool_response ? LOINA_TOOL_RESULT : LOINA_USER));
+        *out=loina_strdup(j->request.tool_response ? "Created." :
+            "<tool_call><function=write><parameter=path>probe.py</parameter><parameter=content>print(1)</parameter></function></tool_call>");
+        check(*out);
+        loina_emit(j,LOINA_TOKEN,*out,strlen(*out),0);
+        return LOINA_OK;
+    }
     if (migrating) {
         check(s->first==0 && s->count==3);
         check(!strcmp(s->messages[0].text,"Remember the codeword: turquoise."));
@@ -58,7 +68,7 @@ static loina_status chat(void *p, loina_session *s, loina_job *j, char **out, lo
     if (loina_job_cancelled(j)) return LOINA_CANCELLED;
     *out=loina_strdup("fixture");return *out ? LOINA_OK : LOINA_MEMORY;
 }
-static bool save(void *p, const char *path) { (void)p;FILE *f=fopen(path,"wb");if (!f) return false;bool ok=fwrite("fixture",1,7,f)==7;return fclose(f)==0 && ok; }
+static bool save(void *p, const char *path) { (void)p;if (fail_save) return false;FILE *f=fopen(path,"wb");if (!f) return false;bool ok=fwrite("fixture",1,7,f)==7;return fclose(f)==0 && ok; }
 static bool restore(void *p, const char *path) { (void)p;(void)path;restored++;return true; }
 static void reset(void *p) { (void)p;reset_count++; }
 const loina_runtime loina_test_runtime={.name="llama",.revision="test-runtime",.abi=1,.backends=backends,
@@ -161,6 +171,42 @@ int main(int argc, char **argv) {
     write_file(path,"abc",3);check(loina_install(e,&p,import,NULL,&error)==LOINA_OK);check(loina_package_installed(e,&p));
     loina_package incompatible=p;incompatible.runtime_abi=2;check(!loina_package_installed(e,&incompatible));
     check(loina_install(e,&incompatible,import,NULL,&error)==LOINA_INTEGRITY);
+    char flat_models[LOINA_PATH],flat_cache[LOINA_PATH],flat_root[LOINA_PATH];
+    check(loina_path(flat_models,argv[1],"gguf",NULL));
+    check(loina_path(flat_cache,argv[1],"kvcache",NULL));
+    check(loina_path(flat_root,argv[1],"terminal",NULL));
+    loina_config flat_config=config;
+    flat_config.directory=flat_root;flat_config.model_directory=flat_models;
+    flat_config.session_directory=flat_cache;flat_config.cache_directory=flat_cache;
+    int restores_before_flat=restored;
+    loina_engine *flat=loina_open(&flat_config,&error);check(flat);
+    check(!loina_uninstall(flat,&p,&error));
+    check(loina_path(path,flat_models,"model.gguf",NULL));
+    write_file(path,"bad",3);
+    check(loina_install(flat,&p,import,NULL,&error)==LOINA_INTEGRITY && !loina_package_installed(flat,&p));
+    write_file(path,"abc",3);
+    struct stat before_stat,after_stat;
+    check(!stat(path,&before_stat));
+    check(!loina_install(flat,&p,flat_models,NULL,&error) && loina_package_installed(flat,&p));
+    check(!stat(path,&after_stat) && before_stat.st_ino==after_stat.st_ino);
+    check(loina_install(flat,&incompatible,import,NULL,&error)==LOINA_INTEGRITY);
+    char model_path[LOINA_PATH];check(loina_artifact_path(flat,&p,0,model_path) && !strcmp(path,model_path));
+    loina_session *flat_session=loina_session_create(flat,"flat-session",&error);check(flat_session);
+    loina_request flat_request=loina_request_default(LOINA_TEXT);
+    flat_request.session=flat_session;flat_request.package=&p;flat_request.prompt="Terminal storage fixture";
+    loina_job *flat_job=loina_job_create(flat,&flat_request,NULL,NULL,&error);check(flat_job);
+    check(!loina_job_run(flat_job,&error));loina_job_free(flat_job);
+    check(loina_path(path,flat_cache,"flat-session.chat",NULL) && loina_file_bytes(path)>0);
+    loina_unload(flat);check(!loina_activate(flat,&p,NULL,&error));
+    check(loina_cache_restore(flat,flat_session));
+    loina_session *flat_again=loina_session_load(flat,"flat-session",&error);check(flat_again && flat_again->count==2);
+    loina_session_free(flat_again);
+    int flat_count=0;check(!loina_session_list(flat,count_session,&flat_count,&error) && flat_count==1);
+    check(!loina_session_delete(flat,"flat-session",&error));
+    flat->cache_session[0]=flat->cache_transcript[0]=0;
+    check(!loina_cache_restore(flat,flat_session));
+    loina_session_free(flat_session);
+    check(!loina_uninstall(flat,&p,&error) && !loina_package_installed(flat,&p));loina_close(flat);restored=restores_before_flat;
     loina_session *s=loina_session_create(e,"regression",&error);check(s);
     check(loina_session_add(s,LOINA_USER,LOINA_MESSAGE_TEXT,"Hello"));
     check(loina_session_add(s,LOINA_ASSISTANT,LOINA_MESSAGE_TEXT,"Hi"));
@@ -358,6 +404,58 @@ int main(int argc, char **argv) {
     e->cache_session[0]=e->cache_transcript[0]=0;
     check(!loina_cache_restore(e,ephemeral));
     loina_session_free(ephemeral);
+    check(!loina_session_delete(e,"manual-save",&error));
+    loina_session *manual=loina_session_create(e,"manual-save",&error);check(manual);
+    loina_session_set_autosave(manual,false);
+    request.session=manual;request.prompt="Save only on request";
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(!loina_job_run(j,&error));loina_job_free(j);
+    check(manual->count==2 && !loina_session_load(e,"manual-save",NULL));
+    check(loina_cache_restore(e,manual));
+    atomic_store(&e->busy,true);
+    check(loina_session_checkpoint(manual,&error)==LOINA_BUSY);
+    atomic_store(&e->busy,false);
+    check(!loina_session_checkpoint(manual,&error) && manual->manual_save);
+    again=loina_session_load(e,"manual-save",&error);check(again && again->count==2);loina_session_free(again);
+    e->cache_session[0]=e->cache_transcript[0]=0;
+    int restores=restored;
+    check(loina_cache_restore(e,manual) && restored==restores+1);
+    j=loina_job_create(e,&request,NULL,NULL,&error);check(j);
+    check(!loina_job_run(j,&error));loina_job_free(j);
+    again=loina_session_load(e,"manual-save",&error);check(again && again->count==2);loina_session_free(again);
+    fail_save=true;
+    check(loina_session_checkpoint(manual,&error)==LOINA_IO && manual->manual_save && !atomic_load(&e->busy));
+    fail_save=false;
+    check(!loina_session_checkpoint(manual,&error));
+    again=loina_session_load(e,"manual-save",&error);check(again && again->count==4);loina_session_free(again);
+    loina_session_free(manual);
+    loina_unload(e);
+    check(!loina_activate(e,&p,NULL,&error));
+    manual=loina_session_load(e,"manual-save",&error);check(manual);
+    loina_session_set_autosave(manual,false);
+    restores=restored;
+    check(!loina_session_checkpoint(manual,&error) && restored==restores+1);
+    loina_session_free(manual);check(!loina_session_delete(e,"manual-save",&error));
+    loina_session *host=loina_session_create(e,"host-tools",&error);check(host);
+    loina_session_set_temporary(host,true);
+    loina_request external=request;
+    char schema[]="[{\"name\":\"write\"}]";
+    external.session=host;external.tool_schema=schema;external.tools=false;
+    external.prompt="Create probe.py";
+    loina_buffer raw={0};
+    int before_web=web_calls;
+    j=loina_job_create(e,&external,capture_event,&raw,&error);check(j);
+    schema[0]=0;
+    check(loina_job_run(j,&error)==LOINA_OK);
+    check(raw.data && strstr(raw.data,"<function=write>") && !strcmp(raw.data,loina_job_result(j)));
+    check(web_calls==before_web && loina_session_count(host)==2);
+    loina_job_free(j);free(raw.data);
+    external.tool_schema="[{\"name\":\"write\"}]";
+    external.tool_response=true;external.prompt="File written.";
+    j=loina_job_create(e,&external,NULL,NULL,&error);check(j);
+    check(loina_job_run(j,&error)==LOINA_OK && !strcmp(loina_job_result(j),"Created."));
+    check(loina_session_count(host)==4 && web_calls==before_web);
+    loina_job_free(j);loina_session_free(host);
     check(loina_path(path,argv[1],"outputs","sample.png"));
     unsigned char pixels[12]={255,0,0,0,255,0,0,0,255,255,255,255};
     check(!loina_png(path,pixels,2,2,3,&error));check(loina_file_bytes(path)>50);

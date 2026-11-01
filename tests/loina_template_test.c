@@ -1,14 +1,16 @@
 #include "loina_internal.h"
 #include "jinja.h"
+#include "loina_agent_tools.h"
 #include <stdlib.h>
 #include <string.h>
 
 #define check(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x);exit(1); } } while (0)
 
-static char *render(llama_jinja *tmpl, const char *tools, bool thinking, bool history, const char *question) {
+static char *render_mode(llama_jinja *tmpl, const char *tools, bool thinking, bool history, const char *question, bool external) {
     loina_buffer b={0};
     check(loina_buffer_puts(&b,"{\"bos_token\":\"<s>\",\"eos_token\":\"</s>\",\"add_generation_prompt\":true,\"enable_thinking\":"));
     check(loina_buffer_puts(&b,thinking ? "true" : "false"));
+    check(loina_buffer_puts(&b,",\"external_tools\":") && loina_buffer_puts(&b,external ? "true" : "false"));
     check(loina_buffer_puts(&b,",\"tools\":") && loina_buffer_puts(&b,tools));
     check(loina_buffer_puts(&b,",\"messages\":[{\"role\":\"system\",\"content\":\"Local assistant.\"}"));
     if (history) check(loina_buffer_puts(&b,",{\"role\":\"user\",\"content\":\"An earlier question.\"},{\"role\":\"assistant\",\"content\":\"An earlier answer.\"}"));
@@ -19,6 +21,9 @@ static char *render(llama_jinja *tmpl, const char *tools, bool thinking, bool hi
     char *prompt=llama_jinja_render(tmpl,b.data,error,sizeof(error));
     if (!prompt) fprintf(stderr,"%s\n",error);
     check(prompt);free(b.data);return prompt;
+}
+static char *render(llama_jinja *tmpl, const char *tools, bool thinking, bool history, const char *question) {
+    return render_mode(tmpl,tools,thinking,history,question,false);
 }
 int main(int argc, char **argv) {
     check(argc==2);
@@ -44,6 +49,14 @@ int main(int argc, char **argv) {
         check(!strstr(prompt,"<tools>") && strstr(prompt,"Что сообщает источник?"));
         check(!strcmp(prompt+strlen(prompt)-strlen(suffix),suffix));free(prompt);
     }
+    char *agent=render(liquid,agent_tool_schema,false,false,"Write a Python program.");
+    check(strstr(agent,"<tools>\n") && strstr(agent,"\"name\": \"write\"") &&
+          strstr(agent,"\"name\": \"bash\"") && strstr(agent,"\"content\""));
+    free(agent);
+    agent=render_mode(liquid,agent_tool_schema,false,true,"Write a Python program.",true);
+    check(strstr(agent,"<|im_start|>tool\n<tool_response>") &&
+          !strstr(agent,"</tool_response><|im_end|>\n<|im_start|>user"));
+    free(agent);
     free(tools);llama_jinja_free(liquid);
     char *policy=loina_template_read(&e,"system.jinja",&error);check(policy);
     llama_jinja *system=llama_jinja_create(policy,error.message,sizeof(error.message));check(system);free(policy);

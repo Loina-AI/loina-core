@@ -83,6 +83,9 @@ typedef struct {
     loina_web_fn web;
     void *user;
     const char *template_directory; /* Optional overrides for bundled templates. */
+    const char *model_directory;    /* Optional flat directory of catalog artifacts (terminal gguf/). */
+    const char *session_directory;  /* Defaults to directory/sessions. */
+    const char *cache_directory;    /* Defaults to directory/cache. */
 } loina_config;
 typedef struct {
     loina_feature feature;
@@ -98,6 +101,8 @@ typedef struct {
     bool tools;
     bool thinking;               /* Default on; available to model adapters. */
     float strength;              /* Img2img noise strength, 0-1; default 0.75. */
+    const char *tool_schema;      /* Optional JSON tools executed by the host, outside the chat web loop. */
+    bool tool_response;          /* Prompt is an observation from host tools. */
 } loina_request;
 
 size_t loina_catalog_count(void);
@@ -127,6 +132,10 @@ loina_session *loina_session_load(loina_engine *engine, const char *id, loina_er
 void loina_session_free(loina_session *session);
 /* Temporary sessions keep their transcript and KV state in memory only. */
 void loina_session_set_temporary(loina_session *session, bool temporary);
+/* Disable per-turn disk writes while retaining live KV and loading saved KV. */
+void loina_session_set_autosave(loina_session *session, bool enabled);
+/* Explicitly persist the transcript and its current text-model KV checkpoint. */
+loina_status loina_session_checkpoint(loina_session *session, loina_error *error);
 const char *loina_session_id(const loina_session *session);
 size_t loina_session_count(const loina_session *session);
 loina_message loina_session_get(const loina_session *session, size_t index);

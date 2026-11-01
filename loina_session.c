@@ -12,7 +12,7 @@ static bool session_path(loina_engine *e, const char *id, char *path) {
     char name[160];
     if (!loina_name_valid(id)) return false;
     snprintf(name,sizeof(name),"%s.chat",id);
-    return loina_path(path,e->directory,"sessions",name);
+    return loina_path(path,e->session_directory,name,NULL);
 }
 loina_session *loina_session_create(loina_engine *e, const char *id, loina_error *error) {
     if (!e || !loina_name_valid(id)) { loina_fail(error,LOINA_INVALID,"Invalid session ID");return NULL; }
@@ -31,6 +31,7 @@ void loina_session_free(loina_session *s) {
 }
 const char *loina_session_id(const loina_session *s) { return s ? s->id : ""; }
 void loina_session_set_temporary(loina_session *s, bool temporary) { if (s) s->temporary=temporary; }
+void loina_session_set_autosave(loina_session *s, bool enabled) { if (s) s->manual_save=!enabled; }
 size_t loina_session_count(const loina_session *s) { return s ? s->count : 0; }
 loina_message loina_session_get(const loina_session *s, size_t i) {
     return s && i<s->count ? s->messages[i] : (loina_message){0};
@@ -126,14 +127,14 @@ loina_status loina_session_delete(loina_engine *e, const char *id, loina_error *
      * session name in every cache directory, including retired model builds. */
 #ifdef _WIN32
     char pattern[LOINA_PATH];
-    loina_path(pattern,e->directory,"cache","*");
+    loina_path(pattern,e->cache_directory,"*",NULL);
     WIN32_FIND_DATAA entry;
     HANDLE h=FindFirstFileA(pattern,&entry);
     if (h!=INVALID_HANDLE_VALUE) {
         do {
             if (!loina_name_valid(entry.cFileName) || !strcmp(entry.cFileName,".") || !strcmp(entry.cFileName,"..")) continue;
             char dir[LOINA_PATH],name[160];
-            loina_path(dir,e->directory,"cache",entry.cFileName);
+            loina_path(dir,e->cache_directory,entry.cFileName,NULL);
             snprintf(name,sizeof(name),"%s.kv",id);loina_path(path,dir,name,NULL);remove(path);
             snprintf(name,sizeof(name),"%s.stamp",id);loina_path(path,dir,name,NULL);remove(path);
         } while (FindNextFileA(h,&entry));
@@ -141,7 +142,7 @@ loina_status loina_session_delete(loina_engine *e, const char *id, loina_error *
     }
 #else
     char root[LOINA_PATH];
-    loina_path(root,e->directory,"cache",NULL);
+    strcpy(root,e->cache_directory);
     DIR *d=opendir(root);
     if (d) {
         struct dirent *entry;
@@ -167,14 +168,14 @@ loina_status loina_session_list(loina_engine *e, loina_session_fn fn, void *user
     if (!e || !fn) return loina_fail(error,LOINA_INVALID,"Missing session list arguments");
     char path[LOINA_PATH];
 #ifdef _WIN32
-    loina_path(path,e->directory,"sessions","*.chat");
+    loina_path(path,e->session_directory,"*.chat",NULL);
     WIN32_FIND_DATAA entry;
     HANDLE h=FindFirstFileA(path,&entry);
     if (h==INVALID_HANDLE_VALUE) return LOINA_OK;
     do { if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) list_entry(entry.cFileName,fn,user); } while (FindNextFileA(h,&entry));
     FindClose(h);
 #else
-    loina_path(path,e->directory,"sessions",NULL);
+    strcpy(path,e->session_directory);
     DIR *d=opendir(path);
     if (!d) return loina_fail(error,LOINA_IO,"Cannot list conversations");
     struct dirent *entry;
