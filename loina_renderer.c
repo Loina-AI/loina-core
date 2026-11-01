@@ -1,6 +1,6 @@
 /* Renderer and tool visualizer from ds4/ds4_agent.c.
  * Copyright (c) 2026 The ds4.c authors; (c) 2023-2026 The ggml authors;
- * (c) 2023 DeepSeek. MIT license: licenses/ds4.txt.
+ * (c) 2023 DeepSeek. MIT license: LICENSE.
  * The output sink and terminal-width query adapt it to Loina's UI worker. */
 #include "loina_renderer.h"
 #include "linenoise.h"

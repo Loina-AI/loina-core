@@ -356,7 +356,7 @@ Thanks also to Salvatore Sanfilippo's [DwarfStar](https://github.com/antirez/ds4
 and Ninnix's [QuarkStar](https://github.com/Ninnix/q36) for their work on local
 inference and for making the implementation and its tradeoffs open to study.
 The terminal editor, renderer, native tool descriptions and file contracts
-include ds4 code under its [MIT license](licenses/ds4.txt).
+include ds4 code under its [MIT license](LICENSE).
 
 Loina's code is distributed under the [MIT license](LICENSE). Runtime source
 code and model weights retain their own licenses; model licenses are recorded

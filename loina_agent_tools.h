@@ -1,4 +1,4 @@
-/* Tool contracts and native Qwen prompt from ds4_agent.c (MIT; licenses/ds4.txt). */
+/* Tool contracts and native Qwen prompt from ds4_agent.c (MIT; LICENSE). */
 static const char agent_tool_schema[] =
     "[\n"
     "{\"type\":\"function\",\"function\":{\"name\":\"google_search\",\"description\":\"Search web pages.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}}},\n"

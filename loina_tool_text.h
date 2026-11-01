@@ -1,6 +1,6 @@
-/* From ds4 (MIT; licenses/ds4.txt). */
-#ifndef DS4_TOOL_TEXT_H
-#define DS4_TOOL_TEXT_H
+/* From ds4 (MIT; LICENSE). */
+#ifndef LOINA_TOOL_TEXT_H
+#define LOINA_TOOL_TEXT_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -8,21 +8,21 @@
 
 /* Tool bodies are not HTML. Escape only their own closing delimiter and
  * spellings that would otherwise collide with that escape. */
-static inline bool ds4_tool_text_escaped_close(const char *s, const char *end) {
+static inline bool loina_tool_text_escaped_close(const char *s, const char *end) {
     if (*s != '&') return false;
     s++;
     while (!strncmp(s, "amp;", 4)) s += 4;
     return !strncmp(s, "lt;", 3) && !strncmp(s + 3, end + 1, strlen(end + 1));
 }
 
-static inline bool ds4_tool_text_needs_escape(const char *s, const char *end) {
-    return !strncmp(s, end, strlen(end)) || ds4_tool_text_escaped_close(s, end);
+static inline bool loina_tool_text_needs_escape(const char *s, const char *end) {
+    return !strncmp(s, end, strlen(end)) || loina_tool_text_escaped_close(s, end);
 }
 
-static inline void ds4_tool_text_unescape(char *s, const char *end) {
+static inline void loina_tool_text_unescape(char *s, const char *end) {
     char *out = s;
     while (*s) {
-        if (ds4_tool_text_escaped_close(s, end)) {
+        if (loina_tool_text_escaped_close(s, end)) {
             if (!strncmp(s, "&amp;", 5)) {
                 *out++ = '&';
                 s += 5;
@@ -39,7 +39,7 @@ static inline void ds4_tool_text_unescape(char *s, const char *end) {
 
 /* A streaming fragment must not split an escape that could become a closing
  * delimiter. Ordinary entities pass through unchanged. */
-static inline bool ds4_tool_text_partial_escape(const char *s, size_t n,
+static inline bool loina_tool_text_partial_escape(const char *s, size_t n,
                                                 const char *end) {
     if (!n || *s != '&') return false;
     s++;

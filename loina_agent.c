@@ -4,7 +4,7 @@
 #include "loina_bash.h"
 #include "loina_storage.h"
 #include "loina_agent_tools.h"
-#include "ds4_tool_text.h"
+#include "loina_tool_text.h"
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -635,7 +635,7 @@ static loina_status agent_web(void *user, const char *url, char **text, loina_jo
     return LOINA_OK;
 }
 
-/* Local file contracts adapted from ds4_agent.c (MIT; licenses/ds4.txt). */
+/* Local file contracts adapted from ds4_agent.c (MIT; LICENSE). */
 
 typedef struct {
     char more_path[PATH_MAX];
@@ -1445,7 +1445,7 @@ static int parse_legacy_calls(const char *reply, tcalls_t *out) {
                 goto fail;
             }
             char *val = xstrndup(pgt + 1, (size_t)(pend - pgt - 1));
-            ds4_tool_text_unescape(val, "</loina_param>");
+            loina_tool_text_unescape(val, "</loina_param>");
             /* trim one surrounding newline (ds4 convention) */
             if (*val == '\n') memmove(val, val + 1, strlen(val));
             size_t vl = strlen(val);
@@ -1503,7 +1503,7 @@ static int parse_calls(const char *reply, tcalls_t *out) {
             if (*value == '\n') value++;
             if (last>value && last[-1]=='\n') last--;
             param->value=xstrndup(value, (size_t)(last-value));
-            ds4_tool_text_unescape(param->value, "</parameter>");
+            loina_tool_text_unescape(param->value, "</parameter>");
             p=close+strlen("</parameter>");
         }
         while (isspace((unsigned char)*p)) p++;
