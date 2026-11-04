@@ -18,7 +18,7 @@ static char *render_mode(llama_jinja *tmpl, const char *tools, bool thinking, bo
     if (history) check(loina_buffer_puts(&b,",{\"role\":\"assistant\",\"content\":\"<think>Check sources.</think>\",\"tool_calls\":[{\"function\":{\"name\":\"web_search\",\"arguments\":{\"query\":\"test\"}}}]},{\"role\":\"tool\",\"content\":\"Source says 42.\"}"));
     check(loina_buffer_puts(&b,"]}"));
     char error[512]="";
-    char *prompt=llama_jinja_render(tmpl,b.data,error,sizeof(error));
+    char *prompt=llama_jinja_render_chat(tmpl,b.data,error,sizeof(error));
     if (!prompt) fprintf(stderr,"%s\n",error);
     check(prompt);free(b.data);return prompt;
 }
@@ -74,6 +74,12 @@ int main(int argc, char **argv) {
     char *generic_prompt=render(generic,"[]",false,false,"A generic question.");
     check(!strcmp(generic_prompt,"<|im_start|>system\nLocal assistant.<|im_end|>\n<|im_start|>user\nA generic question.<|im_end|>\n<|im_start|>assistant\n"));
     free(generic_prompt);llama_jinja_free(generic);
+    llama_jinja *no_system=llama_jinja_create("{% for m in messages %}{% if m['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{{ m['role'] }}:{{ m['content'] }};{% endfor %}",error.message,sizeof(error.message));check(no_system);
+    const char *messages="{\"messages\":[{\"role\":\"system\",\"content\":\"Local assistant.\"},{\"role\":\"user\",\"content\":\"Hello\"},{\"role\":\"assistant\",\"content\":\"Hi\"},{\"role\":\"user\",\"content\":\"Continue\"}]}";
+    check(!llama_jinja_render(no_system,messages,error.message,sizeof(error.message)));
+    char *merged=llama_jinja_render_chat(no_system,messages,error.message,sizeof(error.message));
+    check(merged && !strcmp(merged,"user:Local assistant.\n\nHello;assistant:Hi;user:Continue;"));
+    free(merged);llama_jinja_free(no_system);
     check(!loina_template_model(&e,"../escape.jinja",llama_jinja_default_template(),&error));
     check(!loina_template_read(&e,"../escape.jinja",&error));
     check(loina_mkdir(argv[1]));

@@ -313,9 +313,18 @@ static void s_write(stream_t *s, const char *text, size_t n, bool finish) {
 
 static void stream_event(void *user, loina_event ev, const char *text, size_t n, int progress) {
     stream_t *s = user;
+#ifdef LOINA_AGENT_HOST_EVENT
+    LOINA_AGENT_HOST_EVENT(ev, text, n, progress);
+#else
     if (ev == LOINA_TOKEN && s->in_tool)
         loina_terminal_event(LOINA_TOOL, "preparing tool call", 0);
-    else loina_terminal_event(ev, text, progress);
+    else {
+        /* Token events are byte spans; terminal hosts consume C strings. */
+        char *event_text = xstrndup(text ? text : "", n);
+        loina_terminal_event(ev, event_text, progress);
+        free(event_text);
+    }
+#endif
     if (g_interrupted && s->job)
         loina_job_cancel(s->job);
     if (ev == LOINA_TOKEN) {
@@ -506,6 +515,9 @@ static char *page_text(const char *html) {
 }
 
 static loina_status agent_web(void *user, const char *url, char **text, loina_job *job, loina_error *error) {
+#ifdef LOINA_AGENT_HOST_WEB
+    return LOINA_AGENT_HOST_WEB(user, url, text, job, error);
+#else
     (void)user;
     if (text)
         *text = NULL;
@@ -633,6 +645,7 @@ static loina_status agent_web(void *user, const char *url, char **text, loina_jo
     }
     *text = out;
     return LOINA_OK;
+#endif
 }
 
 /* Local file contracts adapted from ds4_agent.c (MIT; LICENSE). */
@@ -652,10 +665,14 @@ static char *tool_err(const char *fmt, const char *a) {
 }
 
 static bool absolute_path(const char *path, char out[PATH_MAX]) {
+#ifdef LOINA_AGENT_HOST_PATH
+    return LOINA_AGENT_HOST_PATH(path, out);
+#else
     if (!path || !*path) return false;
     if (*path == '/') return snprintf(out, PATH_MAX, "%s", path) < PATH_MAX;
     char cwd[PATH_MAX];
     return getcwd(cwd, sizeof(cwd)) && snprintf(out, PATH_MAX, "%s/%s", cwd, path) < PATH_MAX;
+#endif
 }
 
 typedef struct {
@@ -851,7 +868,7 @@ static bool agent_same_file_version(const struct stat *a, const struct stat *b) 
            ac.tv_sec == bc.tv_sec && ac.tv_nsec == bc.tv_nsec;
 }
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
 /* Linux stores ACLs as xattrs too. A metadata copy failure must abort the
  * replacement, not silently remove access rules from the edited file. */
 static int agent_copy_file_xattrs(int src, int dst) {
@@ -948,11 +965,15 @@ static int agent_replace_file(const char *path, const char *data, size_t len,
         pos += (size_t)n;
     }
     if (exists) {
+        /* Android assigns app ownership and SELinux labels to the new file;
+         * its application sandbox cannot reapply that metadata. */
+#ifndef __ANDROID__
         if (fchown(fd, before.st_uid, before.st_gid) != 0) goto failed;
+#endif
         if (fchmod(fd, before.st_mode & 07777) != 0) goto failed;
 #ifdef __APPLE__
         if (fcopyfile(src, fd, NULL, COPYFILE_ACL | COPYFILE_XATTR) != 0) goto failed;
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
         if (agent_copy_file_xattrs(src, fd) != 0) goto failed;
 #endif
     }
@@ -1240,6 +1261,9 @@ static char *tool_search(search_args_t *a) {
     if (!query || !query[0]) return xstrdup("Tool error: search requires query\n");
     const char *path = a->path;
     if (!path || !path[0]) path = ".";
+    char resolved[PATH_MAX];
+    if (!absolute_path(path, resolved)) return tool_err("invalid path: ", path);
+    path = resolved;
     const char *mode = a->mode;
     if (mode && strcmp(mode, "literal") && strcmp(mode, "regex"))
         return xstrdup("Tool error: search mode must be literal or regex (POSIX extended)\n");
@@ -1306,6 +1330,9 @@ static char *tool_search(search_args_t *a) {
 
 static char *tool_list(const char *path) {
     if (!path || !path[0]) path = ".";
+    char resolved[PATH_MAX];
+    if (!absolute_path(path, resolved)) return tool_err("invalid path: ", path);
+    path = resolved;
     DIR *dir = opendir(path);
     if (!dir) {
         agent_buf b = {0};
@@ -1330,8 +1357,8 @@ static char *tool_list(const char *path) {
                     S_ISLNK(st.st_mode) ? 'l' :
                     S_ISREG(st.st_mode) ? '-' : '?';
         char line[PATH_MAX + 96];
-        snprintf(line, sizeof(line), "%c %10lld %s%s\n", type,
-                 (long long)st.st_size, de->d_name, S_ISDIR(st.st_mode) ? "/" : "");
+        snprintf(line, sizeof(line), "%c %s%s (%lld bytes)\n", type,
+                 de->d_name, S_ISDIR(st.st_mode) ? "/" : "", (long long)st.st_size);
         agent_buf_puts(&out, line);
         shown++;
     }
@@ -1619,12 +1646,20 @@ typedef struct {
 } agent_t;
 
 static char *run_turn(agent_t *a, const char *prompt, const char *vision_path, bool *cancelled) {
+#ifdef LOINA_AGENT_HOST_TURN
+    a->streamed_tools = 0;
+    return LOINA_AGENT_HOST_TURN(a->session, prompt, a->cfg->thinking, a->cfg->max_tokens, cancelled);
+#else
     loina_request r = loina_request_default(vision_path ? LOINA_VISION : LOINA_TEXT);
     r.session = a->session;
     r.prompt = prompt;
     r.input_path = vision_path;
     r.tools = false;
+#ifdef LOINA_AGENT_HOST_SCHEMA
+    r.tool_schema = LOINA_AGENT_HOST_SCHEMA;
+#else
     r.tool_schema = agent_tool_schema;
+#endif
     r.tool_response = !strncmp(prompt, "<tool_response>", 15);
     if (a->cfg->package_id) r.package = loina_catalog_find(a->cfg->package_id);
     r.thinking = a->cfg->thinking;
@@ -1678,6 +1713,7 @@ static char *run_turn(agent_t *a, const char *prompt, const char *vision_path, b
     loina_renderer_free(s.renderer);
     loina_job_free(job);
     return result;
+#endif
 }
 
 static char *run_vision_desc(agent_t *a, const char *image_path) {
@@ -1714,6 +1750,9 @@ static char *run_vision_desc(agent_t *a, const char *image_path) {
 
 static char *dispatch_tool(agent_t *a, tcall_t *c) {
     const char *n = c->name;
+#ifdef LOINA_AGENT_HOST_CHECK
+    if (!strcmp(n, "check")) return LOINA_AGENT_HOST_CHECK();
+#endif
     if (!strcmp(n, "read")) {
         return tool_read(arg_val(c, "path"), arg_long(arg_val(c, "start_line"), 1),
             arg_long(arg_val(c, "max_lines"), 0), arg_bool(arg_val(c, "whole"), false),
@@ -1753,6 +1792,9 @@ static char *dispatch_tool(agent_t *a, tcall_t *c) {
         const char *p = arg_val(c, "path");
         if (!p || !*p)
             return tool_err("view_image needs path", NULL);
+        char resolved[PATH_MAX];
+        if (!absolute_path(p, resolved)) return tool_err("invalid image path: ", p);
+        p = resolved;
         char *desc = run_vision_desc(a, p);
         if (!desc)
             return tool_err("cannot view image: ", p);
@@ -1868,9 +1910,23 @@ static int agent_task(agent_t *a, const char *user_text, const char *vision_path
     int check_reminders = 0;
     for (int round = 0; round < 32; round++) {
         if (g_interrupted) {
+#ifdef LOINA_AGENT_HOST_APPEND
+            if (prompt && !strncmp(prompt, "<tool_response>", 15))
+                LOINA_AGENT_HOST_APPEND(a->session, LOINA_TOOL_RESULT, LOINA_MESSAGE_TEXT, prompt);
+#endif
             free(prompt);
             return 130;
         }
+#ifdef LOINA_AGENT_HOST_INPUT
+        char *input = LOINA_AGENT_HOST_INPUT();
+        if (input) {
+            if (prompt && *prompt && !LOINA_AGENT_HOST_APPEND(a->session,
+                !strncmp(prompt, "<tool_response>", 15) ? LOINA_TOOL_RESULT : LOINA_USER, LOINA_MESSAGE_TEXT, prompt)) {
+                free(input);free(prompt);return 1;
+            }
+            free(prompt); prompt = input; vision = NULL;
+        }
+#endif
         bool cancelled = false;
         char *reply = run_turn(a, prompt, vision, &cancelled);
         free(prompt);
@@ -1878,6 +1934,9 @@ static int agent_task(agent_t *a, const char *user_text, const char *vision_path
         vision = NULL;
         if (!reply)
             return cancelled ? 130 : 1;
+#ifdef LOINA_AGENT_HOST_STATE
+        LOINA_AGENT_HOST_STATE(a->session, NULL);
+#endif
         tcalls_t calls;
         int nc = parse_calls(reply, &calls);
         /* Visible answer = reply minus tool blocks + think handling already
@@ -1927,10 +1986,22 @@ static int agent_task(agent_t *a, const char *user_text, const char *vision_path
                 continue;
             }
             if (nc == 0) {
+#ifdef LOINA_AGENT_HOST_INPUT
+                char *input = LOINA_AGENT_HOST_INPUT();
+                if (input) {
+                    prompt = input;
+                    free(visible); free(reply);
+                    continue;
+                }
+#endif
                 if (!empty && modified && !checked && round < 31 && check_reminders++ < 2) {
+#ifdef LOINA_AGENT_HOST_CHECK
+                    const char *instruction = "\nThe files changed. Call the check tool with no arguments before finishing. Fix failures, then call check again.";
+#else
                     const char *instruction = "\nThe files have changed, but no successful check was run afterward. "
                         "Use bash to run focused tests of the requested behavior and edge cases. "
                         "Fix failures before finishing. Do not merely describe how the user could test it.";
+#endif
                     prompt = xmalloc(strlen(user_text) + strlen(instruction) + 32);
                     sprintf(prompt, "Original task: %s%s", user_text, instruction);
                     fprintf(stderr, "Verifying generated files before finishing.\n");
@@ -1970,7 +2041,7 @@ static int agent_task(agent_t *a, const char *user_text, const char *vision_path
             if ((!strcmp(name, "write") || !strcmp(name, "edit")) && strncmp(r, "Tool error:", 11)) {
                 modified = true; checked = false;
             }
-            if (!strcmp(name, "bash") || !strcmp(name, "bash_status"))
+            if (!strcmp(name, "bash") || !strcmp(name, "bash_status") || !strcmp(name, "check"))
                 checked = bash_result_ok(r);
             if (i)
                 buf_add(&obs, &ol, &oc, "\n\n", 2);
@@ -1993,11 +2064,15 @@ static int agent_task(agent_t *a, const char *user_text, const char *vision_path
         prompt = xmalloc(strlen(obs) + 64);
         sprintf(prompt, "<tool_response>\n%s\n</tool_response>", obs);
         free(obs);
+#ifdef LOINA_AGENT_HOST_STATE
+        LOINA_AGENT_HOST_STATE(a->session, prompt);
+#endif
     }
     free(prompt);
     return 0;
 }
 
+#ifndef LOINA_AGENT_EMBEDDED
 static void list_cb(void *u, const char *id) {
     (void)u;
     puts(id);
@@ -2534,3 +2609,5 @@ int main(int argc, char **argv) {
     free(owned_prompt);
     return rc;
 }
+
+#endif

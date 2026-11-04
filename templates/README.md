@@ -29,7 +29,7 @@ CMake bundles these files for Android and other hosts. Rebuilding picks up edits
 For local experiments, override any file without rebuilding:
 
 ```sh
-./build/loina --templates ./templates -m ../models/LFM3-VL-2B-QAD-Q4_0.gguf -p "Hello"
+./build/loina --templates ./templates -m ../models/LFM3-VL-2B-Q6_K_S.gguf -p "Hello"
 ```
 
 Embedding applications can set `loina_config.template_directory`. Missing
@@ -43,7 +43,7 @@ native XML tools and legacy call formats in saved transcripts, and validates the
 batch before executing any of its calls.
 Changing a model's output format requires corresponding parser support.
 
-LFM3-VL-2B QAD Q4_0 is the sole chat and vision model, with its F16 vision
+LFM3-VL-2B Q6_K_S is the sole chat and vision model, with its F16 vision
 projector requested when an image is attached. Android enables reasoning by
 default, persists the composer's Reasoning toggle, and displays its stream in
 the reasoning panel. Retired-model conversations replay their saved transcript

@@ -71,7 +71,7 @@ The current catalog contains:
 
 | Use | Model package |
 | --- | --- |
-| Default chat | LFM3-VL-2B, QAD Q4_0 |
+| Default chat | LFM3-VL-2B, Q6_K_S |
 | Vision | LFM3-VL-2B with mmproj-LFM3-VL-2B-F16.gguf |
 | Speech recognition | Parakeet TDT 0.6B v3, Q4_K |
 | Image generation | Sana Sprint 0.6B, protected Q8_0, with Gemma 2 Q4_K_M and full FP16 DC-AE |

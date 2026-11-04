@@ -1,51 +1,51 @@
 [
   {
-    "repo": "LiquidAI/LFM3-VL-2B-GGUF",
-    "revision": "7c3b4a43c9023e80bf234fec5e826a3365c8dda8",
-    "name": "LFM 3 VL 2B · Chat",
+    "repo": "bartowski/LFM3-VL-2B-GGUF",
+    "revision": "555b54979cacacdff576a56f29abd25aee968c27",
+    "name": "LFM 3 VL 2B Q6_K_S · Chat",
     "feature": "LOINA_TEXT",
     "runtime": "llama",
     "template": "lfm3-vl-2b.jinja",
     "thinking": true,
     "quality": 12,
-    "memory": 2400000000,
+    "memory": 2800000000,
     "license": "LFM Open License v1.0",
     "files": [
       {
-        "name": "LFM3-VL-2B-QAD-Q4_0.gguf",
-        "sha256": "621c455376cb96a20891697deb9975c6fb47dd5ea98ed3ad1f3b7e8f24f0b1e6",
-        "bytes": 1049615648,
-        "url": "https://huggingface.co/LiquidAI/LFM3-VL-2B-GGUF/resolve/7c3b4a43c9023e80bf234fec5e826a3365c8dda8/LFM3-VL-2B-QAD-Q4_0.gguf"
+        "name": "LFM3-VL-2B-Q6_K_S.gguf",
+        "sha256": "9a35b077bc1ecc86d367ac2a4fa0fac4b90870a4529e1904705b0d3e93e45634",
+        "bytes": 1456719520,
+        "url": "https://huggingface.co/bartowski/LFM3-VL-2B-GGUF/resolve/555b54979cacacdff576a56f29abd25aee968c27/LFM3-VL-2B-Q6_K_S.gguf"
       }
     ],
-    "id": "lfm3-vl-2b-qad-q4_0-b5bfc258b7d7cd35"
+    "id": "lfm3-vl-2b-q6_k_s-ef4e2b67f708c0a0"
   },
   {
-    "repo": "LiquidAI/LFM3-VL-2B-GGUF",
-    "revision": "7c3b4a43c9023e80bf234fec5e826a3365c8dda8",
-    "name": "LFM 3 VL 2B · Vision",
+    "repo": "bartowski/LFM3-VL-2B-GGUF",
+    "revision": "555b54979cacacdff576a56f29abd25aee968c27",
+    "name": "LFM 3 VL 2B Q6_K_S · Vision",
     "feature": "LOINA_VISION",
     "runtime": "llama",
     "template": "lfm3-vl-2b.jinja",
     "thinking": true,
     "quality": 12,
-    "memory": 3200000000,
+    "memory": 3600000000,
     "license": "LFM Open License v1.0",
     "files": [
       {
-        "name": "LFM3-VL-2B-QAD-Q4_0.gguf",
-        "sha256": "621c455376cb96a20891697deb9975c6fb47dd5ea98ed3ad1f3b7e8f24f0b1e6",
-        "bytes": 1049615648,
-        "url": "https://huggingface.co/LiquidAI/LFM3-VL-2B-GGUF/resolve/7c3b4a43c9023e80bf234fec5e826a3365c8dda8/LFM3-VL-2B-QAD-Q4_0.gguf"
+        "name": "LFM3-VL-2B-Q6_K_S.gguf",
+        "sha256": "9a35b077bc1ecc86d367ac2a4fa0fac4b90870a4529e1904705b0d3e93e45634",
+        "bytes": 1456719520,
+        "url": "https://huggingface.co/bartowski/LFM3-VL-2B-GGUF/resolve/555b54979cacacdff576a56f29abd25aee968c27/LFM3-VL-2B-Q6_K_S.gguf"
       },
       {
-        "name": "mmproj-LFM3-VL-2B-F16.gguf",
-        "sha256": "1d8e6e58eefc093e09d6332f081516e1ddbd5b35cfca7f35463fb270db230b1e",
-        "bytes": 378996032,
-        "url": "https://huggingface.co/LiquidAI/LFM3-VL-2B-GGUF/resolve/7c3b4a43c9023e80bf234fec5e826a3365c8dda8/mmproj-LFM3-VL-2B-F16.gguf"
+        "name": "mmproj-LFM3-VL-2B-f16.gguf",
+        "sha256": "7857f8e23d106f225bb942106bc14d62067feeef2551004ee16257f6e30cb771",
+        "bytes": 378996096,
+        "url": "https://huggingface.co/bartowski/LFM3-VL-2B-GGUF/resolve/555b54979cacacdff576a56f29abd25aee968c27/mmproj-LFM3-VL-2B-f16.gguf"
       }
     ],
-    "id": "lfm3-vl-2b-qad-q4_0-29fd236069c09014"
+    "id": "lfm3-vl-2b-q6_k_s-7191cc3abec1870f"
   },
   {
     "repo": "cstr/parakeet-tdt-0.6b-v3-GGUF",

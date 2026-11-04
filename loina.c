@@ -106,6 +106,15 @@ loina_status loina_set_backend(loina_engine *e, unsigned backend, loina_error *e
     atomic_store(&e->busy,false);
     return LOINA_OK;
 }
+loina_status loina_select(loina_engine *e, loina_feature feature, const loina_package *p, loina_error *error) {
+    if (!e || feature<LOINA_TEXT || feature>LOINA_SPEECH || (p && p->feature!=feature))
+        return loina_fail(error,LOINA_INVALID,"Invalid model selection");
+    if (p && !loina_package_compatible(e,p)) return loina_fail(error,LOINA_INCOMPATIBLE,"Model runtime is unavailable");
+    if (atomic_exchange(&e->busy,true)) return loina_fail(error,LOINA_BUSY,"Engine is busy");
+    if (e->preferred[feature]!=p) { loina_unload(e);e->preferred[feature]=p; }
+    atomic_store(&e->busy,false);
+    return LOINA_OK;
+}
 loina_status loina_activate(loina_engine *e, const loina_package *p, loina_job *job, loina_error *error) {
     if (!loina_package_valid(p)) return loina_fail(error,LOINA_INVALID,"Invalid model package");
     const loina_runtime *r=loina_runtime_find(p->runtime);

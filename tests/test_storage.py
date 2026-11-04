@@ -103,7 +103,7 @@ with path.open('ab') as f: f.write(b'abc'[path.stat().st_size:])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Wrong artifact size", result.stderr)
         self.assertFalse(list((self.root / "gguf").glob(".loina/*.ready")))
-        self.assertFalse((self.root / "gguf/LFM3-VL-2B-QAD-Q4_0.gguf").exists())
+        self.assertFalse((self.root / "gguf/LFM3-VL-2B-Q6_K_S.gguf").exists())
 
 
 if __name__ == "__main__":

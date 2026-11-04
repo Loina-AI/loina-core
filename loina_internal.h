@@ -28,6 +28,7 @@ struct loina_engine {
     char template_directory[LOINA_PATH], chat_identity[65];
     const loina_runtime *runtime;
     const loina_package *package;
+    const loina_package *preferred[5];
     void *model;
     unsigned available_backends, selected_backend;
     char cache_session[128], cache_transcript[65];

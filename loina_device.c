@@ -77,6 +77,7 @@ const loina_package *loina_resolve(loina_engine *e, loina_feature feature, loina
         loina_fail(error,LOINA_INVALID,"Invalid model selection request"); return NULL;
     }
     const loina_package *best=NULL;
+    if (e->preferred[feature]) return e->preferred[feature];
     /* Use installed weights before offering a download. Allocation failures
      * belong to the runtime; RAM estimates must not substitute another model. */
     for (size_t i=0;i<loina_catalog_count();i++) {

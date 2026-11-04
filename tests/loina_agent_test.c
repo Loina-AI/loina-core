@@ -1,6 +1,14 @@
 #define main loina_agent_main
+#define loina_terminal_event capture_terminal_event
 #include "../loina_agent.c"
 #undef main
+#undef loina_terminal_event
+
+static char captured_event[128];
+void capture_terminal_event(loina_event event, const char *text, int progress) {
+    (void)event; (void)progress;
+    snprintf(captured_event, sizeof(captured_event), "%s", text ? text : "");
+}
 
 #define check(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); return 1; } } while (0)
 
@@ -109,6 +117,9 @@ int main(void) {
     int saved = dup(STDOUT_FILENO);
     check(saved >= 0 && dup2(fileno(capture), STDOUT_FILENO) >= 0);
     stream_t stream = {.last_nl=true};
+    const char token[] = "Nowink>";
+    stream_event(&stream, LOINA_TOKEN, token, 3, 0);
+    check(!strcmp(captured_event, "Now"));
     const char *prefix = "<think>Planning.</think><tool_call><function=write><parameter=path>live.py</parameter><parameter=content>\nif 1 < 2:\n    print('LIVE')";
     for (const char *p=prefix; *p; p++) s_write(&stream, p, 1, false);
     fflush(stdout);

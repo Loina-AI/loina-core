@@ -54,7 +54,7 @@ Build with the same runtime as the app:
 make BUILD=build-eval CMAKE_FLAGS=-DLOINA_EVAL=ON
 python3 tools/quality.py prepare tests/quality/web.jsonl /tmp/loina-quality-cases
 ./build-eval/loina-quality .loina ./build-eval/runtimes/llama/bin ./templates \
-  lfm3-vl-2b-qad-q4_0-b5bfc258b7d7cd35 /tmp/loina-quality-cases/plan.tsv > answers.jsonl
+  lfm3-vl-2b-q6_k_s-ef4e2b67f708c0a0 /tmp/loina-quality-cases/plan.tsv > answers.jsonl
 python3 tools/quality.py score tests/quality/web.jsonl answers.jsonl
 python3 tools/quality.py compare before.jsonl after.jsonl comparison.html
 python3 tools/quality.py judge suite.jsonl before.jsonl after.jsonl judge.json

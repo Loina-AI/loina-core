@@ -116,6 +116,11 @@ unsigned loina_available_backends(const loina_engine *engine);
 /* Zero restores automatic selection. A nonzero choice must be one available
  * backend; changing it unloads the resident model and its context. */
 loina_status loina_set_backend(loina_engine *engine, unsigned backend, loina_error *error);
+/* Select a host-owned package for a feature, or NULL for automatic selection.
+ * Keep the package alive until replaced or the engine is closed. Chat replays
+ * the transcript when an explicit selection changes its model. */
+loina_status loina_select(loina_engine *engine, loina_feature feature,
+                          const loina_package *package, loina_error *error);
 const loina_package *loina_resolve(loina_engine *engine, loina_feature feature, loina_error *error);
 bool loina_package_installed(loina_engine *engine, const loina_package *package);
 bool loina_package_compatible(loina_engine *engine, const loina_package *package);

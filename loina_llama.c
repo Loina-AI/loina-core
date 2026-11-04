@@ -225,7 +225,8 @@ static char *render(llama_state *state, loina_session *session, loina_job *job, 
     snprintf(context,sizeof(context),"{\"date\":\"%s\",\"local_date\":\"%s\",\"tools\":%s",
         date,local_date,(job->request.tools || job->request.tool_schema) ? "true" : "false");
     loina_buffer variables={0};
-    bool valid=loina_buffer_puts(&variables,context);
+    bool valid=loina_buffer_puts(&variables,context) &&
+        loina_buffer_puts(&variables,job->request.tool_schema ? ",\"agent\":true" : ",\"agent\":false");
     if (job->request.tool_schema) {
         char directory[LOINA_PATH];
         valid=valid && getcwd(directory,sizeof(directory)) &&
@@ -265,7 +266,7 @@ static char *render(llama_state *state, loina_session *session, loina_job *job, 
     ok=ok && loina_buffer_puts(&b,"]}");
     if (!ok) { free(b.data);loina_fail(error,LOINA_MEMORY,"Cannot retain template context");return NULL; }
     llama_jinja *tmpl=(job->request.tools || job->request.tool_schema) && state->tool_template ? state->tool_template : state->chat_template;
-    char *prompt=llama_jinja_render(tmpl,b.data,message,sizeof(message));
+    char *prompt=llama_jinja_render_chat(tmpl,b.data,message,sizeof(message));
     free(b.data);
     if (!prompt) { loina_fail(error,LOINA_UNSUPPORTED,"Cannot render chat template: %s",message);return NULL; }
     size_t n=strlen(prompt);
@@ -337,7 +338,7 @@ static loina_status llama_chat_run(void *pointer, loina_session *session, loina_
         }
         llama_pos position=0;
         if (mtmd_helper_get_n_pos(chunks)+(size_t)job->request.max_tokens+8>s->context_size) status=loina_fail(error,LOINA_INVALID,"Image exceeds the model context");
-        else if (mtmd_helper_eval_chunks(s->vision,s->context,chunks,0,0,256,true,&position)) status=loina_fail(error,LOINA_RUNTIME_ERROR,"Image encoder failed");
+        else if (mtmd_helper_eval_chunks(s->vision,s->context,chunks,0,0,(int32_t)llama_n_batch(s->context),true,&position)) status=loina_fail(error,LOINA_RUNTIME_ERROR,"Image encoder failed");
         mtmd_bitmap_free(image.bitmap);mtmd_input_chunks_free(chunks);
         if (status) goto done;
         s->count=(size_t)position;

@@ -249,11 +249,13 @@ loina_status loina_chat(loina_job *job, loina_error *error) {
     loina_feature feature=r->feature==LOINA_VISION && temporary ? LOINA_VISION : LOINA_TEXT;
     const loina_package *p=NULL;
     if (r->package && r->package->feature==feature) p=r->package;
+    else if (e->preferred[feature]) p=e->preferred[feature];
     else if (s->package_id[0]) p=loina_catalog_find(s->package_id);
     else p=loina_resolve(e,feature,error);
     if (!p) p=loina_resolve(e,feature,error);
     if (!p) { status=loina_fail(error,LOINA_INCOMPATIBLE,"No compatible chat package is available");goto done; }
-    if (s->package_id[0] && strcmp(s->package_id,p->id) && !loina_catalog_find(s->package_id)) {
+    if (s->package_id[0] && strcmp(s->package_id,p->id) &&
+        (e->preferred[feature]==p || !loina_catalog_find(s->package_id))) {
         /* Retired weights cannot share KV. Replay the saved transcript with
          * the current model; ordinary context compaction still applies. */
         strcpy(s->package_id,p->id);s->first=0;
