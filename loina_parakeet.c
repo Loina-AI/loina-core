@@ -273,12 +273,12 @@ static struct parakeet_context_params speech_settings(unsigned backends) {
     for (size_t i=0;i<ggml_backend_dev_count();i++) {
         ggml_backend_dev_t device=ggml_backend_dev_get(i);
         enum ggml_backend_dev_type type=ggml_backend_dev_type(device);
-        if (type!=GGML_BACKEND_DEVICE_TYPE_GPU && type!=GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
+        if (type!=GGML_BACKEND_DEVICE_TYPE_GPU && type!=GGML_BACKEND_DEVICE_TYPE_IGPU && type!=GGML_BACKEND_DEVICE_TYPE_ACCEL) continue;
         const char *name=ggml_backend_reg_name(ggml_backend_dev_backend_reg(device));
         /* Parakeet's OpenCL path can return only blank tokens or crash before
          * backend initialization. Keep dictation on a supported GPU or CPU. */
         unsigned bit=strstr(name,"CUDA") ? LOINA_CUDA : strstr(name,"Metal") ? LOINA_METAL :
-            strstr(name,"Vulkan") ? LOINA_VULKAN : 0;
+            strstr(name,"Vulkan") ? LOINA_VULKAN : (!strcmp(name,"HTP") || !strcmp(name,"Hexagon")) ? LOINA_HEXAGON : 0;
         if (bit & backends) { settings.use_gpu=true;settings.gpu_device=gpu;break; }
         gpu++;
     }
