@@ -353,8 +353,8 @@ and the contributors to these projects for the runtimes and the engineering
 that make local inference possible.
 
 Thanks also to Salvatore Sanfilippo's [DwarfStar](https://github.com/antirez/ds4)
-and Ninnix's [QuarkStar](https://github.com/Ninnix/q36) for their work on local
-inference and for making the implementation and its tradeoffs open to study.
+for its work on local inference and for making the implementation and its
+tradeoffs open to study.
 The terminal editor, renderer, native tool descriptions and file contracts
 include ds4 code under its [MIT license](LICENSE).
 
