@@ -39,11 +39,15 @@ static ggml_backend_dev_t gpu_device(unsigned bits, uint64_t minimum) {
         if (type!=GGML_BACKEND_DEVICE_TYPE_GPU && type!=GGML_BACKEND_DEVICE_TYPE_IGPU) continue;
         const char *name=ggml_backend_reg_name(ggml_backend_dev_backend_reg(d));
         unsigned backend=strstr(name,"OpenCL") ? LOINA_OPENCL : strstr(name,"Vulkan") ? LOINA_VULKAN :
-            strstr(name,"Metal") ? LOINA_METAL : strstr(name,"CUDA") ? LOINA_CUDA : 0;
+            strstr(name,"Metal") ? LOINA_METAL : strstr(name,"CUDA") ? LOINA_CUDA :
+            (!strcmp(name,"HTP") || !strcmp(name,"Hexagon")) ? LOINA_HEXAGON : 0;
         if (!(bits & backend)) continue;
         size_t free_bytes=0,total=0;
         ggml_backend_dev_memory(d,&free_bytes,&total);
-        if (free_bytes>=minimum && free_bytes>best_free) { best=d;best_free=free_bytes; }
+        /* Hexagon reports zero for an unconstrained buffer pool. Its allocator
+         * checks the real limit when loading weights. */
+        bool unlimited=backend==LOINA_HEXAGON && total==0;
+        if ((unlimited || free_bytes>=minimum) && (!best || free_bytes>best_free)) { best=d;best_free=free_bytes; }
     }
     return best;
 }
@@ -64,6 +68,7 @@ static unsigned llama_backends(void) {
         if (strstr(name,"OpenCL")) bits|=LOINA_OPENCL;
         if (strstr(name,"Metal")) bits|=LOINA_METAL;
         if (strstr(name,"CUDA")) bits|=LOINA_CUDA;
+        if (!strcmp(name,"HTP") || !strcmp(name,"Hexagon")) bits|=LOINA_HEXAGON;
     }
     return bits;
 }
@@ -106,9 +111,9 @@ static void *llama_load(loina_engine *e, const loina_package *p, loina_job *job,
     if (!loina_artifact_path(e,p,0,path)) { loina_fail(error,LOINA_INVALID,"Invalid model path");return NULL; }
     llama_quiet_default();
     llama_backend_init();
-    ggml_backend_dev_t candidates[5];
+    ggml_backend_dev_t candidates[6];
     int count=0;
-    const unsigned order[]={LOINA_OPENCL,LOINA_VULKAN,LOINA_METAL,LOINA_CUDA};
+    const unsigned order[]={LOINA_HEXAGON,LOINA_OPENCL,LOINA_VULKAN,LOINA_METAL,LOINA_CUDA};
     for (size_t i=0;i<sizeof(order)/sizeof(order[0]);i++) {
         /* The RAM estimate includes host work, and a projector may use CPU.
          * Check the language weights here; runtime allocation validates the rest. */
@@ -126,7 +131,7 @@ static void *llama_load(loina_engine *e, const loina_package *p, loina_job *job,
         if (gpu) {
             const char *name=ggml_backend_reg_name(ggml_backend_dev_backend_reg(gpu));
             s->backend=strstr(name,"OpenCL") ? LOINA_OPENCL : strstr(name,"Vulkan") ? LOINA_VULKAN :
-                strstr(name,"Metal") ? LOINA_METAL : LOINA_CUDA;
+                strstr(name,"Metal") ? LOINA_METAL : strstr(name,"CUDA") ? LOINA_CUDA : LOINA_HEXAGON;
         }
         struct llama_model_params mp=llama_model_default_params();
         /* NULL discovers GPUs even with CPU weights. An empty list and
@@ -172,9 +177,12 @@ static void *llama_load(loina_engine *e, const loina_package *p, loina_job *job,
         if (trained>0 && cp.n_ctx>(uint32_t)trained) cp.n_ctx=(uint32_t)trained;
         cp.n_batch=256;cp.n_ubatch=128;
         cp.n_threads=cp.n_threads_batch=e->config.device.threads;
-        cp.offload_kqv=accelerated;cp.op_offload=accelerated;
+        /* Keep cache updates and attention on the selected accelerator to avoid
+         * a host/device synchronization at every attention layer. */
+        cp.offload_kqv=accelerated;
+        cp.op_offload=accelerated;
         /* Quantized V requires flash attention. Keep the specified Q8 K / Q4 V
-         * layout consistent across CPU and GPU; fail if a backend cannot run it. */
+         * layout consistent across backends; fail if a backend cannot run it. */
         cp.type_k=GGML_TYPE_Q8_0;cp.type_v=GGML_TYPE_Q4_0;
         cp.flash_attn_type=LLAMA_FLASH_ATTN_TYPE_ENABLED;
         cp.abort_callback=abort_decode;cp.abort_callback_data=s;

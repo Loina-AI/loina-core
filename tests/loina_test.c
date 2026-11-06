@@ -8,7 +8,7 @@
 static int loaded,unloaded,restored,reset_count,web_calls,tool_chat,tool_step;
 static bool thinking_live, migrating;
 static bool thinking_requested, fail_save;
-static unsigned backends(void) { return LOINA_CPU|LOINA_VULKAN|LOINA_OPENCL; }
+static unsigned backends(void) { return LOINA_CPU|LOINA_VULKAN|LOINA_OPENCL|LOINA_HEXAGON; }
 static void *load(loina_engine *e, const loina_package *p, loina_job *j, loina_error *error) {
     (void)e;(void)p;(void)j;(void)error;loaded++;return malloc(1);
 }
@@ -153,6 +153,10 @@ int main(int argc, char **argv) {
     selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==12);
     e->config.device.backends=LOINA_OPENCL;
     check(loina_resolve(e,LOINA_TEXT,&error)==selected);
+    e->config.device.backends=LOINA_HEXAGON;
+    check(loina_resolve(e,LOINA_TEXT,&error)==selected);
+    check(loina_resolve(e,LOINA_VISION,&error));
+    check(!loina_resolve(e,LOINA_IMAGE,&error));
     e->config.device.backends=LOINA_CPU|LOINA_VULKAN;
     e->config.device.available_ram_bytes=1000;
     selected=loina_resolve(e,LOINA_TEXT,&error);check(selected && selected->quality==12);

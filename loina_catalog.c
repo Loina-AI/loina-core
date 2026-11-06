@@ -3,12 +3,12 @@
 
 static const loina_package catalog[] = {
     { .id="lfm3-vl-2b-q6_k_s-ef4e2b67f708c0a0", .name="LFM 3 VL 2B Q6_K_S · Chat", .license="LFM Open License v1.0", .runtime="llama",
-      .chat_template="lfm3-vl-2b.jinja", .thinking=true, .runtime_abi=1, .feature=LOINA_TEXT, .quality=12, .backends=LOINA_CPU|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA|LOINA_OPENCL, .memory_bytes=UINT64_C(2800000000),
+      .chat_template="lfm3-vl-2b.jinja", .thinking=true, .runtime_abi=1, .feature=LOINA_TEXT, .quality=12, .backends=LOINA_CPU|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA|LOINA_OPENCL|LOINA_HEXAGON, .memory_bytes=UINT64_C(2800000000),
       .file_count=1, .files={
         { .name="LFM3-VL-2B-Q6_K_S.gguf", .sha256="9a35b077bc1ecc86d367ac2a4fa0fac4b90870a4529e1904705b0d3e93e45634", .url="https://huggingface.co/bartowski/LFM3-VL-2B-GGUF/resolve/555b54979cacacdff576a56f29abd25aee968c27/LFM3-VL-2B-Q6_K_S.gguf", .bytes=UINT64_C(1456719520) }
       } },
     { .id="lfm3-vl-2b-q6_k_s-7191cc3abec1870f", .name="LFM 3 VL 2B Q6_K_S · Vision", .license="LFM Open License v1.0", .runtime="llama",
-      .chat_template="lfm3-vl-2b.jinja", .thinking=true, .runtime_abi=1, .feature=LOINA_VISION, .quality=12, .backends=LOINA_CPU|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA|LOINA_OPENCL, .memory_bytes=UINT64_C(3600000000),
+      .chat_template="lfm3-vl-2b.jinja", .thinking=true, .runtime_abi=1, .feature=LOINA_VISION, .quality=12, .backends=LOINA_CPU|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA|LOINA_OPENCL|LOINA_HEXAGON, .memory_bytes=UINT64_C(3600000000),
       .file_count=2, .files={
         { .name="LFM3-VL-2B-Q6_K_S.gguf", .sha256="9a35b077bc1ecc86d367ac2a4fa0fac4b90870a4529e1904705b0d3e93e45634", .url="https://huggingface.co/bartowski/LFM3-VL-2B-GGUF/resolve/555b54979cacacdff576a56f29abd25aee968c27/LFM3-VL-2B-Q6_K_S.gguf", .bytes=UINT64_C(1456719520) },
         { .name="mmproj-LFM3-VL-2B-f16.gguf", .sha256="7857f8e23d106f225bb942106bc14d62067feeef2551004ee16257f6e30cb771", .url="https://huggingface.co/bartowski/LFM3-VL-2B-GGUF/resolve/555b54979cacacdff576a56f29abd25aee968c27/mmproj-LFM3-VL-2B-f16.gguf", .bytes=UINT64_C(378996096) }

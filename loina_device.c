@@ -69,7 +69,7 @@ bool loina_package_compatible(loina_engine *e, const loina_package *p) {
     if (!r || r->abi!=p->runtime_abi) return false;
     const loina_device *d=&e->config.device;
     unsigned backends=r->backends() & d->backends & p->backends;
-    if (!(backends & (LOINA_CPU|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA|LOINA_OPENCL))) return false;
+    if (!(backends & (LOINA_CPU|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA|LOINA_OPENCL|LOINA_HEXAGON))) return false;
     return true;
 }
 const loina_package *loina_resolve(loina_engine *e, loina_feature feature, loina_error *error) {
