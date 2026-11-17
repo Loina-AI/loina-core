@@ -35,6 +35,8 @@ the Android and iOS applications can share them.
 
 ## Build
 
+Use the compatible fork revisions listed in [RUNTIMES.md](RUNTIMES.md).
+
 Clone the repositories into the same parent directory:
 
 ```sh

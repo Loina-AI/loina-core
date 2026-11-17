@@ -47,32 +47,39 @@ static void *diffusion_load(loina_engine *e, const loina_package *p, loina_job *
     }
     diffusion_state *s=calloc(1,sizeof(*s));
     if (!s) { loina_fail(error,LOINA_MEMORY,"Cannot allocate diffusion state");return NULL; }
-    sd_ctx_params_t params;
-    sd_ctx_params_init(&params);
-    params.diffusion_model_path=path[0];params.llm_path=path[1];params.vae_path=path[2];params.tokenizer=path[3];
-    params.n_threads=e->config.device.threads;
-    params.enable_mmap=true;
-    params.flash_attn=true;params.diffusion_flash_attn=true;
-    params.params_backend="CPU";
-    if (e->selected_backend==LOINA_OPENCL) params.backend="OpenCL";
-    else if (e->selected_backend==LOINA_VULKAN) params.backend="Vulkan";
-    else if (e->selected_backend==LOINA_METAL) params.backend="Metal";
-    else if (e->selected_backend==LOINA_CUDA) params.backend="CUDA";
-    else if (!(diffusion_backends() & e->config.device.backends & (LOINA_OPENCL|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA))) params.backend="CPU";
+    const char *backend=NULL;
+    if (e->selected_backend==LOINA_OPENCL) backend="OpenCL";
+    else if (e->selected_backend==LOINA_VULKAN) backend="Vulkan";
+    else if (e->selected_backend==LOINA_METAL) backend="Metal";
+    else if (e->selected_backend==LOINA_CUDA) backend="CUDA";
+    else if (!(diffusion_backends() & e->config.device.backends & (LOINA_OPENCL|LOINA_VULKAN|LOINA_METAL|LOINA_CUDA))) backend="CPU";
+    sd_ctx_opt_t *params=sd_ctx_opt_create();
+    if (!params) { free(s);loina_fail(error,LOINA_MEMORY,"Cannot allocate image options");return NULL; }
+    bool configured=sd_opt_set_string(params,"diffusion_model_path",path[0])==SD_STATUS_OK &&
+        sd_opt_set_string(params,"llm_path",path[1])==SD_STATUS_OK &&
+        sd_opt_set_string(params,"vae_path",path[2])==SD_STATUS_OK &&
+        sd_opt_set_string(params,"tokenizer",path[3])==SD_STATUS_OK &&
+        sd_opt_set_int(params,"n_threads",e->config.device.threads)==SD_STATUS_OK &&
+        sd_opt_set_bool(params,"enable_mmap",true)==SD_STATUS_OK &&
+        sd_opt_set_bool(params,"flash_attn",true)==SD_STATUS_OK &&
+        sd_opt_set_bool(params,"diffusion_flash_attn",true)==SD_STATUS_OK &&
+        sd_opt_set_string(params,"params_backend","CPU")==SD_STATUS_OK &&
+        (!backend || sd_opt_set_string(params,"backend",backend)==SD_STATUS_OK);
     ggml_log_get(&s->log,&s->log_user);
     sd_set_log_callback(diffusion_log,s);
-    s->context=new_sd_ctx(&params);
+    if (configured) sd_ctx_create(params,&s->context);
+    sd_opt_free(params);
     /* Chat shares GGML's logger; SD messages keep their separate callback. */
     ggml_log_set(s->log,s->log_user);
     if (!s->context) {
         sd_set_log_callback(NULL,NULL);ggml_log_set(s->log,s->log_user);free(s);
-        loina_fail(error,LOINA_RUNTIME_ERROR,"Cannot initialize Sana Sprint package");return NULL;
+        loina_fail(error,LOINA_RUNTIME_ERROR,"Cannot initialize Sana Sprint package: %s",sd_get_last_error());return NULL;
     }
     return s;
 }
 static void diffusion_unload(void *pointer) {
     diffusion_state *s=pointer;
-    free_sd_ctx(s->context);
+    sd_ctx_free(s->context);
     sd_set_log_callback(NULL,NULL);ggml_log_set(s->log,s->log_user);free(s);
 }
 static void diffusion_progress(int step, int steps, float time, void *pointer) {
@@ -87,34 +94,29 @@ static void diffusion_progress(int step, int steps, float time, void *pointer) {
     }
     if (loina_job_cancelled(s->job)) sd_cancel_generation(s->context,SD_CANCEL_ALL);
 }
-static bool diffusion_decode(int tile, int tiles, const sd_image_t *image, void *pointer) {
+static loina_status diffusion_png(const char *path,const sd_tensor_t *image,loina_error *error) {
+    if (!image || sd_tensor_type(image)!=SD_TENSOR_U8 || sd_tensor_rank(image)!=3)
+        return loina_fail(error,LOINA_RUNTIME_ERROR,"Invalid image tensor");
+    int64_t channels=sd_tensor_dim(image,0),width=sd_tensor_dim(image,1),height=sd_tensor_dim(image,2);
+    if ((channels!=3 && channels!=4) || width<1 || width>4096 || height<1 || height>4096 ||
+        sd_tensor_byte_size(image)!=(size_t)(channels*width*height))
+        return loina_fail(error,LOINA_RUNTIME_ERROR,"Invalid image dimensions");
+    return loina_png(path,sd_tensor_data(image),(int)width,(int)height,(int)channels,error);
+}
+static bool diffusion_decode(int tile, int tiles, const sd_tensor_t *image, void *pointer) {
     diffusion_state *s=pointer;
     s->decoding=true;
     s->progress=30+(tiles ? 69*tile/tiles : 0);
     loina_emit(s->job,LOINA_PROGRESS,"Adding detail",13,s->progress);
     if (image && *s->preview && !loina_job_cancelled(s->job) &&
-        !loina_png(s->preview,image->data,(int)image->width,(int)image->height,(int)image->channel,NULL))
+        !diffusion_png(s->preview,image,NULL))
         loina_emit(s->job,LOINA_IMAGE_PREVIEW,s->preview,strlen(s->preview),s->progress);
     if (loina_job_cancelled(s->job)) sd_cancel_generation(s->context,SD_CANCEL_ALL);
     return !loina_job_cancelled(s->job);
 }
 static loina_status diffusion_image(void *pointer, loina_job *job, loina_error *error) {
     diffusion_state *s=pointer;
-    sd_img_gen_params_t params;
-    sd_img_gen_params_init(&params);
-    params.prompt=job->prompt;params.negative_prompt="";
-    params.width=job->request.width;params.height=job->request.height;
-    params.sample_params.sample_steps=job->request.steps;
-    params.sample_params.sample_method=SCM_SAMPLE_METHOD;
-    params.sample_params.guidance.txt_cfg=1.0f;
-    params.sample_params.guidance.distilled_guidance=4.5f;
-    params.seed=job->request.seed==UINT32_MAX ? -1 : (int64_t)job->request.seed;
-    params.strength=job->request.strength;
-    params.batch_count=1;
-    params.vae_tiling_params.enabled=true;
-    params.vae_tiling_params.tile_size_w=256;params.vae_tiling_params.tile_size_h=256;
-    /* Keep blend margins while avoiding the default half-tile overlap. */
-    params.vae_tiling_params.target_overlap=0.25f;
+    sd_tensor_t *input=NULL;
     if (job->input && *job->input) {
         struct stat file;
         int width,height,channels;
@@ -122,9 +124,35 @@ static loina_status diffusion_image(void *pointer, loina_job *job, loina_error *
             !stbi_info(job->input,&width,&height,&channels) || width>4096 || height>4096 ||
             (uint64_t)width*height>16*1024*1024)
             return loina_fail(error,LOINA_INVALID,"Choose a PNG, JPEG or BMP image up to 20 MB and 4096 pixels per side");
-        params.init_image.data=stbi_load(job->input,&width,&height,&channels,3);
-        if (!params.init_image.data) return loina_fail(error,LOINA_INVALID,"Cannot decode input image");
-        params.init_image.width=(uint32_t)width;params.init_image.height=(uint32_t)height;params.init_image.channel=3;
+        unsigned char *pixels=stbi_load(job->input,&width,&height,&channels,3);
+        if (!pixels) return loina_fail(error,LOINA_INVALID,"Cannot decode input image");
+        int64_t shape[]={3,width,height};
+        input=sd_tensor_create(SD_TENSOR_U8,3,shape,pixels,(size_t)width*height*3);
+        stbi_image_free(pixels);
+        if (!input) return loina_fail(error,LOINA_MEMORY,"Cannot allocate input image");
+    }
+    sd_img_gen_opt_t *params=sd_img_gen_opt_create();
+    if (!params) { sd_tensor_free(input);return loina_fail(error,LOINA_MEMORY,"Cannot allocate image options"); }
+    bool configured=sd_opt_set_string(params,"prompt",job->prompt)==SD_STATUS_OK &&
+        sd_opt_set_string(params,"negative_prompt","")==SD_STATUS_OK &&
+        sd_opt_set_int(params,"width",job->request.width)==SD_STATUS_OK &&
+        sd_opt_set_int(params,"height",job->request.height)==SD_STATUS_OK &&
+        sd_opt_set_int(params,"sample.steps",job->request.steps)==SD_STATUS_OK &&
+        sd_opt_set_string(params,"sample.method","scm")==SD_STATUS_OK &&
+        sd_opt_set_float(params,"sample.guidance.txt_cfg",1.0)==SD_STATUS_OK &&
+        sd_opt_set_float(params,"sample.guidance.distilled_guidance",4.5)==SD_STATUS_OK &&
+        sd_opt_set_int(params,"seed",job->request.seed==UINT32_MAX ? -1 : (int64_t)job->request.seed)==SD_STATUS_OK &&
+        sd_opt_set_float(params,"strength",job->request.strength)==SD_STATUS_OK &&
+        sd_opt_set_int(params,"batch_count",1)==SD_STATUS_OK &&
+        sd_opt_set_bool(params,"vae_tiling.enabled",true)==SD_STATUS_OK &&
+        sd_opt_set_int(params,"vae_tiling.tile_size_w",256)==SD_STATUS_OK &&
+        sd_opt_set_int(params,"vae_tiling.tile_size_h",256)==SD_STATUS_OK &&
+        sd_opt_set_float(params,"vae_tiling.target_overlap",0.25)==SD_STATUS_OK &&
+        (!input || sd_opt_set_tensor(params,"init_image",input)==SD_STATUS_OK);
+    sd_tensor_free(input);
+    if (!configured) {
+        loina_status status=loina_fail(error,LOINA_RUNTIME_ERROR,"Cannot configure image generation: %s",sd_get_last_error());
+        sd_opt_free(params);return status;
     }
     s->job=job;
     s->progress=0;s->decoding=false;
@@ -133,19 +161,18 @@ static loina_status diffusion_image(void *pointer, loina_job *job, loina_error *
     sd_set_progress_callback(diffusion_progress,s);
     sd_set_decode_callback(diffusion_decode,s);
     loina_emit(job,LOINA_PROGRESS,"Preparing image",15,0);
-    sd_image_generation_result_t *images=NULL;
-    bool ok=generate_image(s->context,&params,&images);
-    stbi_image_free(params.init_image.data);
+    sd_result_t *images=NULL;
+    sd_status_t generated=sd_generate_image(s->context,params,&images);
+    sd_opt_free(params);
     sd_set_progress_callback(NULL,NULL);sd_set_decode_callback(NULL,NULL);s->job=NULL;
     if (*s->preview) remove(s->preview);
     loina_status status;
     if (loina_job_cancelled(job)) status=loina_fail(error,LOINA_CANCELLED,"Image generation cancelled");
-    else if (!ok || !images || images->count<1) status=loina_fail(error,LOINA_RUNTIME_ERROR,"Image generation failed");
+    else if (generated!=SD_STATUS_OK || !images || sd_result_get_image_count(images)<1) status=loina_fail(error,LOINA_RUNTIME_ERROR,"Image generation failed");
     else {
-        sd_image_t *image=&images->items[0].image;
-        status=loina_png(job->output,image->data,(int)image->width,(int)image->height,(int)image->channel,error);
+        status=diffusion_png(job->output,sd_result_get_image(images,0),error);
     }
-    if (images) free_sd_image_generation_result(images);
+    sd_result_free(images);
     return status;
 }
 const loina_runtime loina_diffusion={
