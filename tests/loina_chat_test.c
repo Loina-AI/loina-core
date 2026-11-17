@@ -22,7 +22,7 @@ static void capture(void *user, loina_event type, const char *text, size_t n, in
 }
 static char *run(loina_engine *e, loina_session *s, const char *prompt, bool cancel) {
     loina_request r=loina_request_default(LOINA_TEXT);
-    r.session=s;r.prompt=prompt;r.temperature=0;r.max_tokens=192;r.seed=42;
+    r.session=s;r.prompt=prompt;r.temperature=0;r.max_tokens=192;r.seed=42;r.thinking=false;
     loina_error error={0};
     stream output={.cancel=cancel};
     output.job=loina_job_create(e,&r,capture,&output,&error);check(output.job);
