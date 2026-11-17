@@ -352,12 +352,13 @@ Loina builds on [llama.cpp](https://github.com/ggml-org/llama.cpp) and GGML,
 and the contributors to these projects for the runtimes and the engineering
 that make local inference possible.
 
-Thanks also to Salvatore Sanfilippo's [DwarfStar](https://github.com/antirez/ds4)
-for its work on local inference and for making the implementation and its
-tradeoffs open to study.
-The terminal editor, renderer, native tool descriptions and file contracts
-include ds4 code under its [MIT license](LICENSE).
+Special thanks to **Salvatore Sanfilippo (antirez)** and
+[DwarfStar (antirez/ds4)](https://github.com/antirez/ds4). Loina's CLI command
+conventions and C programming style follow his work: small interfaces, direct
+commands, and code that is easy to read and study. The shared terminal renderer,
+native tool descriptions, and file contracts also adapt ds4's MIT-licensed code.
 
-Loina's code is distributed under the [MIT license](LICENSE). Attribution and bundled-code notices are in [NOTICE](NOTICE). Runtime source
-code and model weights retain their own licenses; model licenses are recorded
-in the catalog.
+Loina's code is distributed under the [MIT license](LICENSE). Bundled source
+files retain their original copyright and license notices. Inference runtimes
+and model weights retain their own licenses; model licenses are recorded in
+the catalog.
