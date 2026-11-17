@@ -358,6 +358,6 @@ tradeoffs open to study.
 The terminal editor, renderer, native tool descriptions and file contracts
 include ds4 code under its [MIT license](LICENSE).
 
-Loina's code is distributed under the [MIT license](LICENSE). Runtime source
+Loina's code is distributed under the [MIT license](LICENSE). Attribution and bundled-code notices are in [NOTICE](NOTICE). Runtime source
 code and model weights retain their own licenses; model licenses are recorded
 in the catalog.
